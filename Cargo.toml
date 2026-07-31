@@ -52,6 +52,7 @@ members = [
     "components/timer_list",
     "platforms/ax-plat",
     "platforms/ax-plat-macros",
+    "platforms/axplat-bcm2837-zero2w",
     "platforms/axplat-dyn",
     "platforms/someboot",
     "platforms/somehal",
@@ -194,6 +195,7 @@ axdevice_base = { version = "0.6.2", path = "virtualization/axdevice_base" }
 axfs-ng-vfs = { version = "0.5.6", path = "components/axfs-ng-vfs" }
 axhvc = { version = "0.4.11", path = "virtualization/axhvc" }
 axklib = { version = "0.7.6", path = "components/axklib" }
+axplat-bcm2837-zero2w = { version = "0.1.0", path = "platforms/axplat-bcm2837-zero2w" }
 axplat-dyn = { version = "0.7.13", path = "platforms/axplat-dyn", default-features = false }
 axpoll = { version = "0.5.2", path = "components/axpoll" }
 axvisor = { version = "0.5.22", path = "os/axvisor" }
