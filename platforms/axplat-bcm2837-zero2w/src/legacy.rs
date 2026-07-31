@@ -19,11 +19,13 @@ use axplat_old::{
     time::TimeIf,
 };
 
-use crate::config::{
-    KERNEL_ASPACE_BASE, KERNEL_ASPACE_SIZE, LOCAL_IRQ_CNTPNSIRQ, LOCAL_IRQ_GPU_FAST,
-    LOCAL_IRQ_PENDING0, PHYS_VIRT_OFFSET,
+use crate::{
+    config::{
+        KERNEL_ASPACE_BASE, KERNEL_ASPACE_SIZE, LOCAL_IRQ_CNTPNSIRQ, LOCAL_IRQ_GPU_FAST,
+        LOCAL_IRQ_PENDING0, PHYS_VIRT_OFFSET,
+    },
+    irq::{local_addr, mmio_read, scan_armctrl_pending, timer_irq_legacy_enable},
 };
-use crate::irq::{local_addr, mmio_read, scan_armctrl_pending, timer_irq_legacy_enable};
 
 /// Sentinel IRQ number for the CPU-local timer in the legacy interface.
 pub const TIMER_IRQ_LEGACY: usize = 96;
@@ -96,12 +98,18 @@ struct LegacyPower;
 
 #[impl_plat_interface]
 impl PowerIf for LegacyPower {
+    /// Bootstraps the given CPU core with the given initial stack (physical).
+    #[cfg(feature = "smp")]
+    fn cpu_boot(cpu_id: usize, stack_top_paddr: usize) {
+        crate::power::cpu_boot_shared(cpu_id, stack_top_paddr);
+    }
+
     fn system_off() -> ! {
         crate::power::system_off()
     }
 
     fn cpu_num() -> usize {
-        1
+        crate::config::MAX_CPU_NUM
     }
 }
 
@@ -237,7 +245,18 @@ impl InitIf for LegacyInit {
         crate::time::init_early();
     }
 
+    #[cfg(feature = "smp")]
+    fn init_early_secondary(_cpu_id: usize) {
+        axcpu_old::init::init_trap();
+        crate::time::init_early();
+    }
+
     fn init_later(_cpu_id: usize, _arg: usize) {
+        crate::irq::init_boot_irqs_shared();
+    }
+
+    #[cfg(feature = "smp")]
+    fn init_later_secondary(_cpu_id: usize) {
         crate::irq::init_boot_irqs_shared();
     }
 }
