@@ -1,17 +1,7 @@
 name: CI Branch Push Router
 
 on:
-  push:
-    branches-ignore:
-      - main
-      - dev
-    paths-ignore:
-      - "**/*.md"
-      - "**/*.rst"
-      - "**/*.adoc"
-      - "docs/**"
-      - "**/docs/**"
-      - "**/doc/**"
+  workflow_dispatch:
 
 permissions:
   actions: write

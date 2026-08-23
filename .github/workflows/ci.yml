@@ -1,25 +1,6 @@
 name: CI
 
 on:
-  push:
-    branches:
-      - main
-      - dev
-    paths-ignore:
-      - "**/*.md"
-      - "**/*.rst"
-      - "**/*.adoc"
-      - "docs/**"
-      - "**/docs/**"
-      - "**/doc/**"
-  pull_request:
-    paths-ignore:
-      - "**/*.md"
-      - "**/*.rst"
-      - "**/*.adoc"
-      - "docs/**"
-      - "**/docs/**"
-      - "**/doc/**"
   workflow_dispatch:
     inputs:
       run_target:
