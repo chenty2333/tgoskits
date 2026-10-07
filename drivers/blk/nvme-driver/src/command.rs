@@ -1,7 +1,6 @@
 #![allow(unused)]
 
 use alloc::vec::Vec;
-use core::ptr::slice_from_raw_parts;
 
 use log::debug;
 
@@ -151,13 +150,12 @@ impl Identify for IdentifyActiveNamespaceList {
     fn parse(&self, data: &[u8]) -> Self::Output {
         let mut id_list = Vec::new();
 
-        let raw = unsafe { &*slice_from_raw_parts(data.as_ptr() as *const u32, data.len() / 4) };
-
-        for id in raw {
-            if *id == 0 {
+        for bytes in data.as_chunks::<4>().0 {
+            let id = u32::from_le_bytes(*bytes);
+            if id == 0 {
                 break;
             }
-            id_list.push(*id);
+            id_list.push(id);
         }
 
         id_list
@@ -191,46 +189,27 @@ impl IdentifyController {
 impl Identify for IdentifyController {
     const CNS: u32 = 0x01;
 
-    type Output = ControllerInfo;
+    type Output = Option<ControllerInfo>;
 
     fn parse(&self, data: &[u8]) -> Self::Output {
-        let raw = unsafe {
-            let ptr = data.as_ptr();
-            (ptr as *const ControllerData).read_volatile()
-        };
-
-        ControllerInfo {
-            vendor_id: raw.vendor_id,
-            product_id: raw.product_id,
-            mdts: raw.mdts,
-            sqes_max: raw.sqes >> 4,
-            sqes_min: raw.sqes & 0b1111,
-            cqes_max: raw.cqes >> 4,
-            cqes_min: raw.cqes & 0b1111,
-            max_cmd: raw.max_cmd,
-            number_of_namespaces: raw.number_of_namespaces,
-        }
+        let sqes = *data.get(512)?;
+        let cqes = *data.get(513)?;
+        Some(ControllerInfo {
+            vendor_id: u16::from_le_bytes(data.get(0..2)?.try_into().ok()?),
+            product_id: u16::from_le_bytes(data.get(2..4)?.try_into().ok()?),
+            mdts: *data.get(77)?,
+            sqes_max: sqes >> 4,
+            sqes_min: sqes & 0x0f,
+            cqes_max: cqes >> 4,
+            cqes_min: cqes & 0x0f,
+            max_cmd: u16::from_le_bytes(data.get(514..516)?.try_into().ok()?),
+            number_of_namespaces: u32::from_le_bytes(data.get(516..520)?.try_into().ok()?),
+        })
     }
 
     fn command_set_mut(&mut self) -> &mut CommandSet {
         &mut self.command_set
     }
-}
-
-#[repr(C)]
-pub struct ControllerData {
-    pub vendor_id: u16,
-    pub product_id: u16,
-    pub serial_number: [u8; 20],
-    pub model_number: [u8; 40],
-    pub firmware_revision: [u8; 8],
-    pub rsv_before_mdts: [u8; 5],
-    pub mdts: u8,
-    pub rsv: [u8; 512 - 8 - 40 - 20 - 2 - 2 - 5 - 1],
-    pub sqes: u8,
-    pub cqes: u8,
-    pub max_cmd: u16,
-    pub number_of_namespaces: u32,
 }
 
 #[derive(Debug)]
@@ -248,7 +227,9 @@ pub struct ControllerInfo {
 
 #[cfg(test)]
 mod tests {
-    use super::{Identify, IdentifyController, IdentifyNamespaceDataStructure};
+    use super::{
+        Identify, IdentifyActiveNamespaceList, IdentifyController, IdentifyNamespaceDataStructure,
+    };
 
     #[repr(align(8))]
     struct IdentifyData([u8; 4096]);
@@ -331,13 +312,16 @@ mod tests {
 
     #[test]
     fn identify_controller_reads_mdts_from_spec_offset() {
-        let mut data = [0_u8; 4096];
+        #[repr(align(4))]
+        struct AlignedBuffer([u8; 4097]);
+        let mut storage = AlignedBuffer([0; 4097]);
+        let data = &mut storage.0[1..];
         data[77] = 7;
         data[512] = 0x66;
         data[513] = 0x44;
         data[516..520].copy_from_slice(&3_u32.to_le_bytes());
 
-        let info = IdentifyController::new().parse(&data);
+        let info = IdentifyController::new().parse(data).unwrap();
 
         assert_eq!(info.mdts, 7);
         assert_eq!(info.sqes_min, 6);
@@ -345,5 +329,17 @@ mod tests {
         assert_eq!(info.cqes_min, 4);
         assert_eq!(info.cqes_max, 4);
         assert_eq!(info.number_of_namespaces, 3);
+        assert!(IdentifyController::new().parse(&data[..519]).is_none());
+        assert!(IdentifyController::new().parse(&[]).is_none());
+    }
+
+    #[test]
+    fn active_namespace_list_decodes_unaligned_bytes_and_stops_at_zero() {
+        #[repr(align(4))]
+        struct AlignedBuffer([u8; 17]);
+        let mut storage = AlignedBuffer([0; 17]);
+        let data = &mut storage.0[1..];
+        data.copy_from_slice(&[1, 0, 0, 0, 0x34, 0x12, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0]);
+        assert_eq!(IdentifyActiveNamespaceList::new().parse(data), [1, 0x1234]);
     }
 }

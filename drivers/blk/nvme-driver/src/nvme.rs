@@ -251,7 +251,8 @@ impl Nvme {
         let state = mem::replace(&mut self.init_state, NvmeInitState::Failed);
         match state {
             NvmeInitState::IdentifyController(pending) => {
-                let controller = parse_identify(pending);
+                let controller = parse_identify(pending)
+                    .ok_or(Error::Unknown("invalid NVMe Identify Controller data"))?;
                 self.sqes = u32::from(controller.sqes_min);
                 self.cqes = u32::from(controller.cqes_min);
                 self.num_ns = controller.number_of_namespaces as usize;
