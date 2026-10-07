@@ -330,9 +330,9 @@ impl Nvme {
                     .ok_or(Error::Unknown("active NVMe namespace disappeared"))?;
                 let namespace = Namespace {
                     id: namespace_id,
-                    lba_size: namespace.lba_size as usize,
-                    lba_count: namespace.namespace_size as usize,
-                    metadata_size: namespace.metadata_size as usize,
+                    lba_size: namespace.lba_size,
+                    lba_count: namespace.namespace_size,
+                    metadata_size: usize::from(namespace.metadata_size),
                 };
                 self.namespace = Some(namespace);
                 self.init_state = NvmeInitState::Ready;
@@ -551,7 +551,7 @@ fn controller_max_transfer_bytes(minimum_page_size: usize, mdts: u8) -> Option<u
 pub struct Namespace {
     pub id: u32,
     pub lba_size: usize,
-    pub lba_count: usize,
+    pub lba_count: u64,
     pub metadata_size: usize,
 }
 

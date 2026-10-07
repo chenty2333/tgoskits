@@ -423,7 +423,7 @@ fn device_info(name: &'static str, namespace: Namespace) -> DeviceInfo {
     DeviceInfo {
         name: Some(name),
         model: Some("nvme"),
-        ..DeviceInfo::new(namespace.lba_count as u64, namespace.lba_size)
+        ..DeviceInfo::new(namespace.lba_count, namespace.lba_size)
     }
 }
 
