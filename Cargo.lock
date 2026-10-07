@@ -474,6 +474,7 @@ version = "0.3.1"
 dependencies = [
  "ax-cpu",
  "ax-driver",
+ "ax-fs-ng",
  "ax-hal",
  "ax-memory-addr",
  "ax-mm",
