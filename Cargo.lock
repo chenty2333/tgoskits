@@ -469,6 +469,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "arceos-test-intel-hda"
+version = "0.1.0"
+dependencies = [
+ "ax-alloc",
+ "ax-driver",
+ "ax-hal",
+ "ax-std",
+ "axklib",
+ "dma-api",
+ "intel-hda",
+ "mmio-api",
+ "pcie",
+ "rdrive",
+]
+
+[[package]]
 name = "arceos-test-suit"
 version = "0.3.1"
 dependencies = [
@@ -4490,6 +4506,15 @@ dependencies = [
  "proc-macro2-diagnostics",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "intel-hda"
+version = "0.1.0"
+dependencies = [
+ "dma-api",
+ "mmio-api",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
