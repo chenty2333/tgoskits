@@ -540,8 +540,9 @@ fn controller_max_transfer_bytes(minimum_page_size: usize, mdts: u8) -> Option<u
         None
     } else {
         Some(
-            minimum_page_size
+            1usize
                 .checked_shl(u32::from(mdts))
+                .and_then(|scale| minimum_page_size.checked_mul(scale))
                 .unwrap_or(usize::MAX),
         )
     }
@@ -591,5 +592,8 @@ mod tests {
             controller_max_transfer_bytes(64 * 1024, 1),
             Some(128 * 1024)
         );
+        for mdts in [(usize::BITS - 12) as u8, u8::MAX] {
+            assert_eq!(controller_max_transfer_bytes(4096, mdts), Some(usize::MAX));
+        }
     }
 }

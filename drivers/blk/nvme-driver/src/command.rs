@@ -113,6 +113,9 @@ impl Identify for IdentifyNamespaceDataStructure {
         let lba_format = data.get(lba_format_offset..lba_format_offset + 4)?;
         let metadata_size = u16::from_le_bytes(lba_format[0..2].try_into().ok()?);
         let lba_data_size = lba_format[2];
+        if lba_data_size < 9 {
+            return None;
+        }
         let lba_size = 1usize.checked_shl(u32::from(lba_data_size))?;
 
         Some(NamespaceDataStructure {
@@ -317,11 +320,13 @@ mod tests {
     }
 
     #[test]
-    fn identify_namespace_rejects_unrepresentable_lba_data_size() {
-        let mut data = IdentifyData::namespace(1, 0, 0, 0);
-        data.set_lba_format(0, 0, usize::BITS as u8);
+    fn identify_namespace_rejects_unsupported_or_unrepresentable_lba_data_sizes() {
+        for lba_data_size in [0, 8, usize::BITS as u8] {
+            let mut data = IdentifyData::namespace(1, 0, 0, 0);
+            data.set_lba_format(0, 0, lba_data_size);
 
-        assert!(data.parse().is_none());
+            assert!(data.parse().is_none());
+        }
     }
 
     #[test]

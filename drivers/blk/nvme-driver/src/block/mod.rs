@@ -108,9 +108,17 @@ impl NvmeBlockDriver {
                 Ok(ControllerUpdate::state(ControllerState::WaitingForIrq))
             }
             NvmeInitProgress::Ready(namespace) => {
+                let limits = io_queue::limits(
+                    self.nvme.dma_info(),
+                    self.nvme.page_size(),
+                    self.nvme.max_transfer_bytes(),
+                    namespace,
+                    self.queue_depth,
+                );
                 if namespace.lba_size == 0
                     || namespace.lba_count == 0
                     || namespace.metadata_size != 0
+                    || limits.max_blocks_per_request == 0
                 {
                     return Err(BlkError::NotSupported);
                 }
