@@ -73,6 +73,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "acpica-interpreter"
+version = "0.1.0"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "addr2line"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -469,6 +476,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "arceos-test-acpica-interpreter"
+version = "0.1.0"
+dependencies = [
+ "acpica-interpreter",
+ "ax-alloc",
+ "ax-hal",
+ "ax-std",
+]
+
+[[package]]
 name = "arceos-test-intel-hda"
 version = "0.1.0"
 dependencies = [
@@ -491,6 +508,7 @@ dependencies = [
  "ax-alloc",
  "ax-cpu",
  "ax-driver",
+ "ax-fs-ng",
  "ax-hal",
  "ax-memory-addr",
  "ax-mm",
