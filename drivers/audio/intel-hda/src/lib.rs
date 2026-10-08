@@ -210,3 +210,6 @@ extern crate std;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(feature = "rdif")]
+mod rdif;

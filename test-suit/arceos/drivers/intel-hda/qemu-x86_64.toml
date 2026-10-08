@@ -5,9 +5,8 @@ args = [
     "-smp", "1",
     "-display", "none",
     "-serial", "mon:stdio",
-    "-audiodev", "driver=none,id=hda0",
     "-device", "intel-hda",
-    "-device", "hda-duplex,audiodev=hda0",
+    "-device", "hda-duplex,audiodev=pcm-capture",
 ]
 
 timeout = 120
@@ -17,3 +16,6 @@ fail_regex = ["(?i)\\bpanic(?:ked)?\\b"]
 
 [[shell_check_steps]]
 success_regex = ["(?m)^INTEL_HDA_QEMU_OK\\s*$"]
+
+[host_pcm_waveform]
+frames = 4096

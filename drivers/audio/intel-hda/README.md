@@ -11,10 +11,20 @@ HDA 寄存器和命令协议以 Linux 7.2.3 的 HDA 上游实现及规范行为�
 
 ## QEMU 验收边界
 
-`test-suit/arceos/drivers/intel-hda` 在 Q35 上使用 `intel-hda`、`hda-duplex` 和 `none` 音频后端，实际探测 PCI/BAR 并运行生产控制器的 MMIO、CORB/RIRB、DMA 播放及关闭路径。用例提交四个非零 PCM period，要求完成 token 与提交顺序一致、无流错误，并成功 release/shutdown；缺设备或失败会使测试失败。
+`test-suit/arceos/drivers/intel-hda` 在 Q35 上使用 `intel-hda`、`hda-duplex` 和 `wav` 音频后端，实际探测 PCI/BAR 并运行生产控制器的 MMIO、CORB/RIRB、DMA 播放及关闭路径。用例通过系统注册的通用播放接口提交四个非零 PCM period，要求完成 token 与提交顺序一致、无流错误，校验完整输出波形，并成功 release/shutdown；缺设备或失败会使测试失败。
 
 ```sh
 cargo xtask arceos test qemu --arch x86_64 --test-group drivers --test-case intel-hda
 ```
 
 结果证明 QEMU 控制器与 DMA 播放生命周期，不证明可听输出、HDMI/ELD 或实体硬件兼容。后两类工作不在本次验收范围。
+
+## 通用播放能力与 ArceOS 接入
+
+`rdif` 功能实现 `rdif_audio::Playback`，保留单一控制器所有权、复制提交、完成 token、取消和失败隔离。不依赖 ArceOS，也不建立音频全局状态。当前广告配置为 S16_LE、48 kHz、双声道、1024-frame period、4 个 period；其他配置在硬件写入前拒绝。
+
+ArceOS 的 `ax-driver/intel-hda` 是显式启用的生产 PCI 适配器：使用既有设备发现、MMIO 映射和设备级 DMA 域绑定，将控制器注册到 `rdrive`。设备对象经 `take_playback_devices()` 一次性移交给调用方。此版本使用有界轮询，PCI INTx 与 HDA INTCTL 均不启用；不注册未拥有的中断。
+
+QEMU 用例不再在测试探测回调中直接操作控制器，而是在启动后使用通用播放能力。`wav` 后端记录输出，任务工具为每次运行创建独立临时文件并自动删除；4096 帧以帧位置和声道编码，校验完整连续波形与前后静音，从而发现遗漏、重排、重复或样本改写。通过复制后立即清零调用方缓冲区，实际输出同时检验复制提交契约。取消和 shutdown 也通过公共接口验证。
+
+QEMU 参数参考 [QEMU 音频后端文档](https://www.qemu.org/docs/master/system/invocation.html)。该验证证明公共播放接口、系统发现/注册、实际 DMA 与 QEMU 输出样本，不证明物理可听声音或真机兼容性；不迁入完整 ALSA/OSS、HDMI 或录音。

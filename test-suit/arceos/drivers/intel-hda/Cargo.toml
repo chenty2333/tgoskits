@@ -10,15 +10,9 @@ ax-std = ["dep:ax-std"]
 
 [dependencies]
 ax-alloc = { workspace = true, features = ["global-allocator"] }
-ax-driver = { workspace = true, features = ["pci", "list-pci-devices"] }
+ax-driver = { workspace = true, features = ["intel-hda", "list-pci-devices"] }
 ax-hal.workspace = true
 ax-std = { workspace = true, optional = true, default-features = false, features = ["alloc", "ipi", "paging"] }
-axklib.workspace = true
-dma-api.workspace = true
-intel-hda.workspace = true
-mmio-api.workspace = true
-pcie.workspace = true
-rdrive.workspace = true
 
 [package.metadata.docs.rs]
 targets = ["x86_64-unknown-none"]

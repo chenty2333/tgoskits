@@ -13,6 +13,10 @@ version = "0.1.0"
 dma-api.workspace = true
 mmio-api.workspace = true
 thiserror.workspace = true
+rdif-audio = { workspace = true, optional = true }
 
 [package.metadata.clippy]
 configurations = [{ name = "x86_64-none", target = "x86_64-unknown-none" }]
+
+[features]
+rdif = ["dep:rdif-audio"]
