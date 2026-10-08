@@ -489,6 +489,7 @@ dependencies = [
 name = "arceos-test-suit"
 version = "0.3.1"
 dependencies = [
+ "ax-alloc",
  "ax-cpu",
  "ax-driver",
  "ax-hal",
@@ -499,13 +500,17 @@ dependencies = [
  "ax-task",
  "axbacktrace",
  "axfs-ng-vfs",
+ "axklib",
  "dma-api",
  "embedded-graphics",
  "libc",
  "mmio-api",
  "rand 0.8.8",
+ "rdif-block",
  "rdif-iommu",
  "rdrive",
+ "virtio-drivers",
+ "zerocopy",
 ]
 
 [[package]]
