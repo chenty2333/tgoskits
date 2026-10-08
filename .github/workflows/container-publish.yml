@@ -1,6 +1,7 @@
 name: Reusable Container Publish
 
 on:
+  workflow_dispatch:
   workflow_call:
     inputs:
       image_name:
@@ -36,7 +37,7 @@ jobs:
       - name: Prepare image name
         id: prep
         env:
-          IMAGE_NAME: ${{ inputs.image_name }}
+          IMAGE_NAME: ${{ inputs.image_name || format('ghcr.io/{0}-container', github.repository) }}
         run: |
           image="$(printf '%s' "$IMAGE_NAME" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
           echo "image=${image}" >> "$GITHUB_OUTPUT"
@@ -64,10 +65,10 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
-          file: ${{ inputs.dockerfile }}
+          file: ${{ inputs.dockerfile || 'container/Dockerfile' }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: ${{ inputs.build_args }}
-          cache-from: type=gha,scope=${{ inputs.cache_scope }}
-          cache-to: type=gha,mode=max,scope=${{ inputs.cache_scope }}
+          cache-from: type=gha,scope=${{ inputs.cache_scope || 'container' }}
+          cache-to: type=gha,mode=max,scope=${{ inputs.cache_scope || 'container' }}
