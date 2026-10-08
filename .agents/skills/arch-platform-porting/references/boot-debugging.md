@@ -17,8 +17,9 @@
 QEMU `hostfwd` 发 `GET /api/v1/ota/status` 才能证明客户端可访问。
 `cargo xtask axloader test qemu --target x86_64-unknown-uefi` 使用真实 FAT
 镜像跨 QEMU 启动，避免 `fat:rw:` 的实验性写入语义污染回滚结论。
-首次迁移覆盖启动器时仍可能断电，需要保留
-`EFI/AXLOADER/BOOTX64.ORIGINAL.EFI` 及外部启动介质。没有同网卡 TCP4
+迁移覆盖启动器时仍可能断电，需要保留
+`EFI/AXLOADER/BOOTX64.ORIGINAL.EFI`；全新安装若原来存在启动器则保留
+`BOOTX64.PREVIOUS.EFI`，两种安装都需要外部启动介质。没有同网卡 TCP4
 服务绑定时观察 `ota_direct_unavailable`，服务端启动功能仍可使用。
 
 本文件记录 LoongArch 动态统一可扩展固件接口平台启动、someboot 对称多处理、StarryOS 测试和 Axvisor LoongArch 虚拟化扩展 QEMU 冒烟测试的项目经验。
@@ -73,7 +74,9 @@ Axvisor x86 嵌套 OVMF 用例按下列顺序调试：
 
 这些嵌套开放虚拟机固件用例仍通过 `fw_cfg` 提供 Linux 内核、初始内存文件系统和命令行，不证明客户机外围部件互连总线启动磁盘、固件系统分区或 Linux 固件存根启动路径。后续能力失败不能通过修改这些只用于验证的用例解决。
 
-AArch64 宿主替换中，把不可变固件计划中的每个 GICR 区域和步长，与传给运行时的 `ArmVgicConfig` 比较。不得通过向下转换已注册 GIC 前端推断配置。宿主 GIC 内存映射区域保持陷入，客户机写入不能改变宿主 GICD 或 GICR。
+AArch64 宿主替换中，把不可变固件计划中的每个 GICR 区域和步长，与传给运行时的 `ArmVgicConfig` 比较。不得通过向下转换已注册 GIC 前端推断配置。宿主 GIC 内存映射区域保持陷入，客户机写入不能改变宿主 GICD 或 GICR。 `virtualized` 客户机通过 `dtb_path` 或静态镜像提供 DTB 时，在保留 MMIO 区间与创建设备计划前，从该 DTB 选择 GIC 配置；缺失或无效的 GIC 描述使启动失败。未提供 DTB、直通地址空间客户机及 UEFI 路径继续采用原有宿主／机器配置。运行时用选定配置同时生成虚拟 GIC 和修补客户机 DTB，不能只改设备树中的地址。UART 和定时器的 `interrupt-parent` 必须引用最终客户机控制器，不能直接沿用宿主 phandle；回归需覆盖宿主与客户机 phandle 不同的情况。虚拟 UART 的资源图使用电平线语义，但显式 DTB 中的 GIC trigger flags 是客户机固件描述，不参与宿主虚拟线建立，因此 UART 解析不因 edge 描述拒绝启动。UART 仍必须直接引用选定的主 GIC 或 PLIC，避免按错误的控制器格式解码 specifier。替换 UART、定时器节点时优先保留客户机已有 phandle，使原引用保持有效；宿主编号仅可在未占用时复用，发生冲突时为新节点分配唯一编号。Zephyr 编译时固定硬件地址，需同时核对生成头文件、配套 DTB 和虚拟设备布局；此规则不意味着任意板卡 DTB 中的全部设备都能自动虚拟化。
+
+替换显式 `dtb_path` 的 UART 节点时，保留客户机 DTB 中的中断类型、编号及三单元或四单元宽度，但把 GIC trigger flags 统一写成 level-high（`4`），使输出描述与虚拟 UART 的电平线行为一致。宿主只用中断类型和编号建立虚拟设备资源，不根据输入 DTB 的 trigger flags 改变虚拟线语义。最终 GIC 保留客户机已有的 `#interrupt-cells`；四单元 binding 的末单元继续使用客户机已有的优先级，输入只有三单元而目标要求四单元时填默认值 `0`。
 
 ## OrangePi-5-Plus Linux 网卡直通
 
@@ -413,6 +416,38 @@ AArch64 客户机向量中的致命宿主异常通过 `ax_cpu::trap::fatal::Fata
 Starry 的可执行文件页、COW 拷贝及预填充由 `PageObject::prepare_executable_mapping` 在可执行 PTE 发布前完成缓存同步，mprotect 同样先同步被保留的叶子页。AArch64 使用直接映射别名清理 D-cache 到 PoU，再以 `ic ialluis; dsb ish; isb` 完成 Inner Shareable 指令缓存失效；远端 CPU 的用户异常返回提供 context synchronization。只执行 TLBI、加原子屏障或只在首次进入用户态清缓存不能覆盖后续缺页。
 
 对照 Linux `8cd9520d35a6c38db6567e97dd93b1f11f185dc6` 的 `__set_ptes_anysz -> __sync_cache_and_tags -> __sync_icache_dcache`。用 `cargo xtask starry test board --board orangepi-5-plus --test-case exec-cache` 验证文件页内核写入后的重新取指；QEMU 只作为执行路径检查，不作为 I-cache/D-cache 实机红绿证明。完整所有权与证据见 `docs/design/user-executable-cache-coherence.md`。
+
+## SG2002 SD 临时启动
+
+LicheeRV Nano SG2002 已验证可以由 U-Boot 从 SD 第二分区加载 `cargo xtask`
+生成的同一份 Starry FIT，避免反复通过 115200 波特率串口传输内核。先在板端
+核对 FIT 的 SHA256 和字节数并执行 `sync`，保留原 Linux 内核、`fip.bin` 和
+持久 U-Boot 环境。以下路径为临时镜像示例，`setenv` 后不执行 `saveenv`：
+
+```text
+ext4ls mmc 0:2 /root
+ext4load mmc 0:2 0x82200000 /root/starry.fit
+setenv bootargs 'root=/dev/mmcblk0p2 rootwait rw console=ttyS0,115200 earlycon=sbi riscv.fwsz=0x80000 init=/bin/sh HOME=/root TERM=linux PS1=starry-voice> PATH=/usr/sbin:/usr/bin:/sbin:/bin -- -i'
+bootm 0x82200000
+```
+
+此配置只被动等待行首 `(?m)^starry-voice>`，不设置会在 bootargs 回显中命中的
+`shell_prefix`，看到真正的提示符后再发命令。需要自动 shell 步骤时，按后文
+“宿主 initramfs”在 shell 内派生提示符。串口归单个完整事务独占；上传子进程
+释放端口不表示其父脚本已结束。每次运行使用独立日志，避免截断仍在写入的文件。
+
+2026-10-07 的实板中，Starry 新写文件经校验和 `sync` 后暂未出现在 U-Boot
+`ext4ls` 中；原 Linux 启动后能读到同一散列，Linux 同步并正常重启后，U-Boot
+成功加载。遇到相同现象先通过原 Linux 检查，不重写 SD 或直接判定文件丢失；
+具体日志恢复或目录索引原因仍需另行定位。Starry 软件重启未回到 U-Boot 时，
+先核对实际输出，再请求物理 RESET，不循环重发重启命令。Linux 正常重启需要
+等待服务关闭，不能把中途仍有 shell 回显当作失败。
+
+当前固件继承的串口线路为 115200。临时文件传送应保留该线路配置，仅调整
+回显和原始输入模式；不要根据尚未与硬件同步的 `Terminal::default()` 波特率
+重设设备。本次显式写入 115200 后，宿主 120192 才能稳定通信，复位后恢复
+115200；这是分数分频支持的诊断线索，不是所有 SG2002 的固定波特率约定。
+
 ## 宿主 initramfs
 
 板卡测试停在 systemd 的 `Freezing execution`，或 BusyBox 持续启动不存在的

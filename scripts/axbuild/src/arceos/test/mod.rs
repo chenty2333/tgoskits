@@ -38,6 +38,7 @@ const ARCEOS_RUST_STANDALONE_FEATURES: &[&str] = &[
     "iommu-dma",
     "nvme-qemu",
     "serial-rx",
+    "virtio-block-lifecycle",
     // This fixture owns the Unix namespace instead of the real filesystem.
     "net-unix-path",
 ];
@@ -61,6 +62,7 @@ const ARCEOS_RUST_QEMU_FEATURES: &[&str] = &[
     "net-loopback",
     "net-unix-path",
     "serial-rx",
+    "virtio-block-lifecycle",
     "sched-cfs",
     "sched-rr",
     "task-affinity",
@@ -117,7 +119,7 @@ pub(super) async fn test(arceos: &mut ArceOS, args: ArgsTest) -> anyhow::Result<
 /// Device fixtures require the QEMU machine that implements their hardware.
 fn rust_qemu_feature_supports_arch(feature: &str, arch: &str) -> bool {
     match feature {
-        "serial-rx" | "iommu-dma" => arch == "aarch64",
+        "serial-rx" | "iommu-dma" | "virtio-block-lifecycle" => arch == "aarch64",
         "nvme-qemu" => arch == "x86_64",
         _ => true,
     }
