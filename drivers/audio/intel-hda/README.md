@@ -6,7 +6,7 @@
 
 创建控制器会复位设备、启用命令环、探测编解码器并配置一个可用的模拟输出路径；成功后，播放接口只接受固定为 16-bit stereo、48 kHz 的四个 4096-byte period。`submit` 在接受新 period 前同步轮询硬件位置；若发现有完成 token 尚未由 `complete` 取走，会返回 `Again` 且不接受本次数据，调用方应先反复调用 `complete` 取走已完成 token，再重试。`prepare` 不会丢弃未取走的完成 token；需要取消时调用 `abort`。无支持路由、DMA 能力不足、状态超时或回读异常时返回错误。shutdown 只有在播放流、CORB/RIRB 与全局复位都通过状态回读确认后才释放可能被设备访问的 DMA 内存；无法证明设备已停止时会保留该内存而不返还给分配器。
 
-HDA 寄存器和命令协议以 Linux 7.2.3 的 HDA 上游实现及规范行为为对照。代码移植自 TheKernel 的 Apache-2.0 HDA 核心，路径为 crates/ax/tk-axdriver-hda/src；Linux GPL 源码未复制到本 crate。模块行为测试和编译检查不能证明物理 Intel HDA 硬件兼容；当前没有 TGOSKits 上的实体板卡验收。
+HDA 寄存器和命令协议以 Linux 7.2.3 的 HDA 上游实现及规范行为为对照。该 crate 使用 Apache-2.0 许可；Linux GPL 实现代码未复制到本 crate。模块行为测试和编译检查不能证明物理 Intel HDA 硬件兼容；当前没有 TGOSKits 上的实体板卡验收。
 
 
 ## QEMU 验收边界
