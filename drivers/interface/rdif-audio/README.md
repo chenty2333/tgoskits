@@ -9,7 +9,7 @@
 - `prepare` 建立播放流。`submit` 接受恰好一个 period，并在返回前复制调用方样本；成功后调用方可以立即复用原切片。失败不接受本次 period。第一个提交启动播放。
 - `PlaybackToken` 只标识同一设备上尚未完成的提交，不是 DMA 指针或跨设备 ID。`complete` 按提交顺序返回完成 token，每个 token 只返回一次；`Again` 表示需要回收完成或等待容量，不能当作成功。
 - 该最小版本明确采用任务上下文轮询契约。调用方在 `max_poll_interval_ns()` 以内服务设备；它不是中断事件接口，也不保证低延迟。未来 IRQ 接入需要单独设计，不用周期轮询伪装成 IRQ 完成。
-- 完成表示硬件已消费对应 DMA period，不自动代表输出尾部已结束。调用方回收完成后调用 `release` 排空输出尾部并停止；`abort` 在确认停止后取消全部 outstanding token，再允许重新准备。
+- 完成表示硬件已消费对应 DMA period，不自动代表输出尾部已结束。建议调用方回收全部完成后调用 `release` 排空输出尾部并停止；`release` 不丢弃已完成但尚未领取的 token，调用方仍可通过 `complete` 领取，全部领取前再次 `prepare` 会返回 `Busy`。`abort` 在确认停止后取消全部 outstanding token，再允许重新准备。
 - `shutdown` 永久关闭设备；失败和析构必须继续保留或隔离仍可能被设备访问的 DMA，不能把超时当作硬件已停止的证明。
 
 ## 设计选择

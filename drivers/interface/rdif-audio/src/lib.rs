@@ -83,6 +83,8 @@ pub trait Playback: DriverGeneric {
     fn complete(&mut self) -> Result<Option<PlaybackToken>, PlaybackError>;
     /// Drain the output tail and stop. Busy leaves pending work owned by the
     /// device; callers must continue collecting completions or explicitly abort.
+    /// Already completed but uncollected tokens remain available after release;
+    /// collect them before preparing another stream.
     fn release(&mut self) -> Result<(), PlaybackError>;
     /// Stop and cancel outstanding tokens. On error resources remain owned or
     /// quarantined, never released on a timeout alone. Re-prepare after success.
