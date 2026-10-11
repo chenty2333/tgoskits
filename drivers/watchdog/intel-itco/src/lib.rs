@@ -170,6 +170,9 @@ pub enum Error {
     /// A timer register readback did not match the requested value.
     #[error("iTCO timer register readback failed")]
     Io,
+    /// Starting was refused and NO_REBOOT rollback also failed.
+    #[error("iTCO start rollback could not restore NO_REBOOT protection")]
+    StartRollbackFailed,
     /// The controller is not running or caller requested an invalid transition.
     #[error("invalid iTCO watchdog state")]
     BadState,
@@ -193,6 +196,8 @@ pub struct Tco<I: RegisterIo> {
     resources: Resources,
     boot_status: bool,
     running: bool,
+    // Also retained when a failed start could not restore NO_REBOOT, so stop
+    // remains available to retry the protective register update.
     owns_watchdog: bool,
     timeout_secs: Option<u32>,
 }
@@ -242,8 +247,10 @@ impl<I: RegisterIo> Tco<I> {
     /// Configures, acknowledges prior status, and explicitly starts the timer.
     ///
     /// timeout_seconds is an operator policy input; this method never supplies
-    /// a default. On a rejected register readback, the controller is not marked
-    /// running and the error is returned to the owner.
+    /// a default. If hardware refuses to clear HALT after NO_REBOOT is cleared,
+    /// the core restores NO_REBOOT before returning. If that rollback also
+    /// fails, `StartRollbackFailed` retains cleanup ownership so `stop()` can
+    /// retry the protective update; neither failure marks the timer running.
     pub fn start(&mut self, timeout_seconds: u32) -> Result {
         if self.running {
             return Err(Error::BadState);
@@ -271,6 +278,11 @@ impl<I: RegisterIo> Tco<I> {
         self.io
             .write_port16(self.port(regs::CONTROL1), control & !regs::HALT);
         if self.io.read_port16(self.port(regs::CONTROL1)) & regs::HALT != 0 {
+            self.owns_watchdog = true;
+            if self.set_no_reboot(true).is_err() {
+                return Err(Error::StartRollbackFailed);
+            }
+            self.owns_watchdog = false;
             return Err(Error::Locked);
         }
         self.timeout_secs = Some(timeout_seconds);

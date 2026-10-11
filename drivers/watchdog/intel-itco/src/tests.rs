@@ -8,6 +8,8 @@ struct FakeIo {
     gcs: BTreeMap<u64, u32>,
     writes: Vec<(u8, u64, u32)>,
     ignore_gcs_writes: bool,
+    ignore_no_reboot_set: bool,
+    refuse_tco_start: bool,
     ignore_smi_enable_writes: bool,
 }
 
@@ -22,6 +24,9 @@ impl RegisterIo for FakeIo {
         // The two status registers are write-one-to-clear.
         let value = if matches!(port & 0x1f, 0x04 | 0x06) {
             old & !u32::from(value)
+        } else if self.refuse_tco_start && port & 0x1f == regs::CONTROL1 && value & regs::HALT == 0
+        {
+            old
         } else {
             u32::from(value)
         };
@@ -45,7 +50,9 @@ impl RegisterIo for FakeIo {
 
     fn write_gcs32(&mut self, address: u64, value: u32) {
         self.writes.push((5, address, value));
-        if !self.ignore_gcs_writes {
+        if !self.ignore_gcs_writes
+            && !(self.ignore_no_reboot_set && value & regs::NO_REBOOT_V2 != 0)
+        {
             self.gcs.insert(address, value);
         }
     }
@@ -159,6 +166,60 @@ fn locked_no_reboot_readback_does_not_claim_watchdog_started() {
     let mut tco = Tco::new(io, device, resources).unwrap();
     assert_eq!(tco.start(30), Err(Error::Locked));
     assert!(!tco.is_running());
+}
+
+#[test]
+fn refused_start_restores_no_reboot_after_halt_release_fails() {
+    let (device, resources) = ich9();
+    let gcs = resources.no_reboot_gcs().unwrap();
+    let mut io = FakeIo {
+        refuse_tco_start: true,
+        ..FakeIo::default()
+    };
+    io.ports
+        .insert(resources.tco_port() + regs::CONTROL1, u32::from(regs::HALT));
+    io.gcs.insert(gcs, regs::NO_REBOOT_V2);
+    let mut tco = Tco::new(io, device, resources).unwrap();
+
+    assert_eq!(tco.start(30), Err(Error::Locked));
+    assert!(!tco.is_running());
+    assert_eq!(tco.timeout_seconds(), None);
+    let io = tco.into_io();
+    assert_ne!(
+        io.ports
+            .get(&(resources.tco_port() + regs::CONTROL1))
+            .copied()
+            .unwrap()
+            & u32::from(regs::HALT),
+        0
+    );
+    assert_ne!(io.gcs.get(&gcs).copied().unwrap() & regs::NO_REBOOT_V2, 0);
+}
+
+#[test]
+fn failed_start_rollback_retains_ownership_for_stop_retry() {
+    let (device, resources) = ich9();
+    let gcs = resources.no_reboot_gcs().unwrap();
+    let mut io = FakeIo {
+        ignore_no_reboot_set: true,
+        refuse_tco_start: true,
+        ..FakeIo::default()
+    };
+    io.ports
+        .insert(resources.tco_port() + regs::CONTROL1, u32::from(regs::HALT));
+    io.gcs.insert(gcs, regs::NO_REBOOT_V2);
+    let mut tco = Tco::new(io, device, resources).unwrap();
+
+    assert_eq!(tco.start(30), Err(Error::StartRollbackFailed));
+    assert!(!tco.is_running());
+    assert_eq!(tco.timeout_seconds(), None);
+    // Stop must reach the hardware and retry NO_REBOOT, not reject the call as
+    // unowned merely because the watchdog never reached its running state.
+    assert_eq!(tco.stop(), Err(Error::Locked));
+    tco.io.ignore_no_reboot_set = false;
+    assert_eq!(tco.stop(), Ok(()));
+    let io = tco.into_io();
+    assert_ne!(io.gcs.get(&gcs).copied().unwrap() & regs::NO_REBOOT_V2, 0);
 }
 
 #[test]
