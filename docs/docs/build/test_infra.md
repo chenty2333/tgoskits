@@ -118,7 +118,7 @@ loop {
 
 ## 5. Build group 分组
 
-`grouping.rs` 把发现的用例按 `build_config_path` 去重分组：
+`grouping.rs` 先按 `build_config_path` 收集用例，再按最终 `Cargo` 配置合并编译身份相同的组：
 
 ```rust
 pub(crate) fn group_cases_by_build_config<T: BuildConfigRef>(
@@ -128,7 +128,7 @@ pub(crate) fn group_cases_by_build_config<T: BuildConfigRef>(
 }
 ```
 
-`prepare_case_build_groups()` 为每个 group 调用 `prepare_context(build_config_path)`，得到该组共享的 `(ResolvedRequest, Cargo)`。随后组内每个用例复用这一次内核构建产物，只各自准备运行资产和启动 QEMU。这就是"OS 只构建一次"的实现：**分组键是 build config 路径**，而非用例名或架构。
+`prepare_case_build_groups()` 为每个路径组调用 `prepare_context(build_config_path)`，得到 `(ResolvedRequest, Cargo)`，再用 `Cargo` 的完整编译字段合并等价组。随后组内每个用例复用这一次内核构建产物，只各自准备运行资产和启动 QEMU；运行阶段仍恢复用例自己的 build config 路径，读取独立的 VM 配置和 initramfs。这样 runtime 配置差异不会被错误地当作编译差异，同时避免重复 Cargo 编译。
 
 ## 6. Pipeline 类型与解析
 
@@ -169,7 +169,7 @@ Rust pipeline（`test/build/rust.rs`）交叉编译用例 `rust/` 目录下的 C
 1. `rust_musl_target(arch)` 把架构名映射到 musl target triple（如 `aarch64` → `aarch64-unknown-linux-musl`）；
 2. `rustup target add <triple>` 确保目标已安装；
 3. 解压 rootfs 获取目标 sysroot，由 `write_cross_bin_wrappers()` 生成交叉工具包装器；
-4. 可选执行 `prebuild.sh`（在 Alpine staging root 内通过 qemu-user 运行，用于 `apk add` 原生依赖）；
+4. 可选执行 `prebuild.sh`（在目标 Alpine 环境中运行，用于 `apk add` 原生依赖）；
 5. 设置 `CARGO_TARGET_<TRIPLE>_LINKER` 指向 `cross-bin/ld`，执行 `cargo build --release`；
 6. 产物复制到 overlay 的 `/usr/bin/`。
 
@@ -190,7 +190,9 @@ rootfs 解包（`debugfs rdump`）的权限决策：Linux 上按有效 uid、完
 
 两条路径均保留 staging root 作为目标 sysroot。宿主 binutils 版本必须能够处理该 sysroot 的 ELF 特性；例如旧工具不识别 `.relr.dyn` 时，链接错误会向外传播，需要升级交叉工具链。`rootfs::runtime::sync_runtime_dependencies()` 按 `readelf`、`llvm-readelf`、`<gnu_tool_prefix>-readelf` 的顺序选择宿主 ELF 检查工具，继续使用已有的递归依赖同步逻辑。
 
-原生 binutils 只能替代构建工具，不能执行客户机脚本。存在 `prebuild.sh` 的用例仍通过 `prepare_guest_prebuild_env()` 要求 qemu-user；缺失时在资产准备阶段报错，不跳过脚本或删去依赖其产物的子用例。因此不带 prebuild 的 C、分组 C 和 Rust 资产可以使用原生工具，当前 `qemu/system` 等带共享 prebuild 的套件仍需要 qemu-user。这项支持不代表 macOS 上完整 Starry 套件已经可用；需要完整套件时使用提供 qemu-user 的 Linux 环境。
+原生 binutils 只能替代构建工具。`prebuild.sh` 找到 qemu-user 时沿用原路径；否则由
+目标 `qemu-system-*` 启动 `/guest/linux/linux-qemu`，通过 9P 挂载工作目录并执行同一脚本。
+失败、提前退出或超时都会使资产准备失败。
 
 ## 7. 资产准备与 rootfs 缓存
 

@@ -7,6 +7,8 @@ sidebar_label: "矩阵执行"
 
 `ci_plan.py` 输出的是执行计划，不是测试结果。实际覆盖需要顺着 `ci.yml` 的分组依赖、`reusable-check-matrix.yml` 的步骤日志和 `cargo xtask` 的用例汇总逐层确认。
 
+计划和结果的公共 shell/Python 逻辑由 `.github/actions/ci-plan`、`.github/actions/ci-result` 及 `scripts/test/ci_result.py` 复用。调用者仍保留各自的 `needs`、secrets、资源队列和矩阵失败策略，因此复用不会合并不同能力边界。
+
 ## 1. 分组门禁
 
 `_build_main_plan()` 生成静态检查，`_build_test_group_outputs()` 按 Workspace、ArceOS、Starry、AxVisor 分组生成 `*_matrix` 和 `*_required`。某组未被选择时，caller 不调用空矩阵。
@@ -28,7 +30,7 @@ sidebar_label: "矩阵执行"
 
 | 分组 | 代表性执行链路 |
 | --- | --- |
-| Workspace | 增量 Clippy；std 白名单测试；qperf 的构建、ABI 和采样检查 |
+| Workspace | 增量 Clippy；std 白名单测试；同一行追加 Linux perf 下载契约、task-switch 换算和 qperf 描述符/入口回归 |
 | ArceOS | 各架构 `arceos test qemu`；部分行先验证启动、SMP 或追加 task-ipi 场景 |
 | Starry | `starry test qemu` 后追加 `ktest qemu -p starry-kernel`；独立板卡行运行 `starry test board` |
 | AxVisor | 按清单运行 QEMU、Intel VMX、AMD SVM 和具体板卡场景；一行可包含多个启动变体 |

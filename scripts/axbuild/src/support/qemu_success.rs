@@ -179,21 +179,13 @@ fn append_bounded_tail(tail: &mut Vec<u8>, chunk: &[u8]) {
 
 pub(crate) fn capture_required_success_output(
     success_regex: &[String],
-    capture: Option<crate::backtrace::BacktraceQemuCapture>,
-) -> (
-    Option<crate::backtrace::BacktraceQemuCapture>,
-    Option<QemuSuccessOutput>,
-) {
+) -> Option<QemuSuccessOutput> {
     if success_regex.is_empty() {
-        return (capture, None);
+        return None;
     }
 
     let success_output = QemuSuccessOutput::new(success_regex);
-    let capture = match capture {
-        Some(capture) => capture.with_success_output(success_output.clone()),
-        None => crate::backtrace::BacktraceQemuCapture::success_output_only(success_output.clone()),
-    };
-    (Some(capture), Some(success_output))
+    Some(success_output)
 }
 
 pub(crate) fn configured_success_regex(qemu: &QemuConfig) -> Vec<String> {
@@ -469,8 +461,7 @@ mod tests {
                  toml"
             ),
             include_str!(
-                "../../../../test-suit/axvisor/normal/qemu-acpi-ovmf/ovmf-acpi/qemu-x86_64-svm.\
-                 toml"
+                "../../../../test-suit/axvisor/normal/qemu-svm/ovmf-acpi-svm/qemu-x86_64.toml"
             ),
         ] {
             let config: toml::Value = toml::from_str(config).unwrap();
@@ -563,13 +554,5 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(err.to_string(), "QEMU timeout");
-    }
-
-    #[test]
-    fn success_only_output_does_not_enable_backtrace_block_capture() {
-        let output = captured_output(&["PASS"], &[]);
-        let capture = crate::backtrace::BacktraceQemuCapture::success_output_only(output);
-
-        assert!(!capture.captures_backtrace_blocks());
     }
 }

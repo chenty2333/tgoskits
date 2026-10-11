@@ -1,4 +1,64 @@
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
+
+use anyhow::Context;
+
 use super::*;
+
+/// Preserve an executable before another build can reuse Cargo's artifact path.
+///
+/// QEMU and board runners both build several Cargo configurations in one
+/// invocation. Keeping each ELF under its build-group directory lets the
+/// runtime phase select the correct executable without rebuilding it.
+pub(crate) fn preserve_build_artifact(
+    source: &Path,
+    artifact_directory: &Path,
+    build_group_index: usize,
+) -> anyhow::Result<PathBuf> {
+    let file_name = source
+        .file_name()
+        .with_context(|| format!("build artifact {} has no file name", source.display()))?;
+    let group_directory = artifact_directory.join(format!("group-{build_group_index}"));
+    fs::create_dir_all(&group_directory).with_context(|| {
+        format!(
+            "failed to create build-group artifact directory {}",
+            group_directory.display()
+        )
+    })?;
+    let destination = group_directory.join(file_name);
+    fs::copy(source, &destination).with_context(|| {
+        format!(
+            "failed to preserve build artifact {} at {}",
+            source.display(),
+            destination.display()
+        )
+    })?;
+    let source_map = source.with_extension("axbt");
+    if source_map.is_file() {
+        let destination_map = destination.with_extension("axbt");
+        fs::copy(&source_map, &destination_map).with_context(|| {
+            format!(
+                "failed to preserve AXBT map {} at {}",
+                source_map.display(),
+                destination_map.display()
+            )
+        })?;
+    }
+    let source_kernel_symbols = source.with_extension("axks");
+    if source_kernel_symbols.is_file() {
+        let destination_kernel_symbols = destination.with_extension("axks");
+        fs::copy(&source_kernel_symbols, &destination_kernel_symbols).with_context(|| {
+            format!(
+                "failed to preserve AXKS map {} at {}",
+                source_kernel_symbols.display(),
+                destination_kernel_symbols.display()
+            )
+        })?;
+    }
+    Ok(destination)
+}
 
 pub(crate) fn group_cases_by_build_config<T: BuildConfigRef>(
     cases: &[T],
@@ -30,15 +90,22 @@ pub(crate) fn prepare_case_build_groups<T, R>(
 where
     T: BuildConfigRef,
 {
-    group_cases_by_build_config(cases)
-        .into_iter()
-        .map(|group| {
-            let (request, cargo) = prepare_context(group.build_config_path)?;
-            Ok(QemuCaseBuildGroup {
+    let mut prepared: Vec<QemuCaseBuildGroup<'_, T, R>> = Vec::new();
+    for group in group_cases_by_build_config(cases) {
+        let (request, cargo) = prepare_context(group.build_config_path)?;
+        if let Some(existing) = prepared.iter_mut().find(|existing| existing.cargo == cargo) {
+            // Build TOMLs may differ only in runtime inputs such as AxVisor
+            // vm_configs. Cargo identity is the compilation boundary, so
+            // reuse the prepared executable while each case keeps its own
+            // runtime configuration.
+            existing.group.cases.extend(group.cases);
+        } else {
+            prepared.push(QemuCaseBuildGroup {
                 group,
                 request,
                 cargo,
-            })
-        })
-        .collect()
+            });
+        }
+    }
+    Ok(prepared)
 }

@@ -22,7 +22,7 @@ cargo xtask starry test qemu \
 `snapshot=on` 接入，客户机写入不会落回原镜像。
 
 如需复现某个既有内核制品，可再传入位于 Cargo target 目录之外的绝对路径
-`--fixed-elf /absolute/path/starryos`。运行器仍先完成当前源码构建与 `.kallsyms`
+`--fixed-elf /absolute/path/starryos`。运行器仍先完成当前源码构建并生成 `.axbt` sidecar
 后处理，再比较构建产物和固定 ELF 的架构、入口以及装载与覆盖率 section；验证成功后
 只从固定 ELF 的临时副本启动，因此不会改写固定文件本体。
 
@@ -256,7 +256,7 @@ scripts/test/ltp-syscalls/generate-common.sh \
 这次接管的边界有意收缩：PR #1775 新增或修改过可执行 C 源码的 Starry cases 从发现
 流程中整项移除，由最终共同集中的官方 LTP 结果承担回归；原 C cases 中 LTP 没有表达的
 自定义断言不再保留，也不再宣称仍被覆盖。ArceOS C 测试仍由 ArceOS 自己的测试入口维护。
-性能基准 `apps/starry/wakeup-latency-bench` 作为独立 Starry app 保留，供后续调优使用。
+性能基准 `benchmarks/starry/wakeup-latency-bench` 作为独立 Starry app 保留，供后续调优使用。
 
 逐项 syscall 迁移以 `scripts/test/ltp-syscalls/migration.csv` 为账本。按当前工作约定，
 候选 LTP 出错时保留原测试，记录候选、失败架构、错误输出和证据路径后暂缓，先处理
@@ -331,7 +331,7 @@ cargo xtask starry test qemu --arch loongarch64 -c qemu/system/test-tty-termios-
 根 PID 1 退出。`qemu/pid1`、`qemu/pid1-exit`、`qemu/pid1-exit-thread` 和 `qemu/pid1-fault` 安装专用
 `/sbin/init`，验证根 PID 1 的信号、回收语义、两种退出入口与同步缺页；`qemu/openrc` 验证服务管理和终端重新拉起。
 
-`qemu/host-initramfs` 与 `qemu/host-initramfs-disk-fallback` 在 case 目录放置
+`qemu/host-initramfs`、`qemu/host-initramfs-disk-fallback` 与 `qemu/host-initramfs-switch-root` 在 case 目录放置
 `host-initramfs.toml`，其中 `source` 指向工作区内的归档目录；可选的
 `init_source` 指向 AArch64 `/init` 的 C 源码，同目录须有 `entry-aarch64.S`。
 axbuild 在运行前用 clang/lld 编译 `/init`、构建 `newc` 归档，再交给 QEMU。
@@ -370,9 +370,8 @@ Pipeline 创建的副本只负责资产注入，不承担 QEMU 运行期写隔�
 C、分组 C 和 Rust 资产通过 `write_cross_bin_wrappers()` 统一选择 binutils：优先使用
 qemu-user 执行 staging root 内的工具，否则使用宿主原生 `<gnu_tool_prefix>-<tool>`
 交叉工具。原生模式仍需要目标 sysroot；缺少任一所需工具会在构建前失败。
-`prebuild.sh` 仍由 `prepare_guest_prebuild_env()` 要求 qemu-user，不能因为缺少模拟器
-而跳过脚本或依赖其产物的测试。当前 `qemu/system` 有共享 prebuild，仍需要 qemu-user；
-完整套件应在具备该能力的 Linux 环境执行。
+`prebuild.sh` 始终在目标 Alpine 环境执行：优先使用 qemu-user，缺少时使用目标
+`qemu-system-*` 和 9P 挂载执行同一脚本；失败必须传播，不得跳过脚本或测试。
 
 ## QEMU TOML
 
@@ -453,7 +452,8 @@ set -eu
 apk add zlib-dev
 ```
 
-`prebuild.sh` 通过 qemu-user 在 staging rootfs 中执行。可用环境变量包括：
+`prebuild.sh` 在目标 Alpine 环境中执行；宿主无 qemu-user 时由 axbuild 使用对应的
+qemu-system 和 rootfs 内核。可用环境变量包括：
 
 - `STARRY_STAGING_ROOT`
 - `STARRY_CASE_DIR`
@@ -642,6 +642,7 @@ App 的 `board-<name>.toml` 默认复用
 cargo xtask starry test board --board orangepi-5-plus
 cargo xtask starry test board -c native-hardware-smoke --board orangepi-5-plus
 cargo xtask starry app board -t network-throughput -b OrangePi-5-Plus --board-config board-orangepi-5-plus.toml
+cargo xtask starry app board -t benchmark/iperf3 -b OrangePi-5-Plus
 ```
 
 `native-hardware-smoke` 在一次启动中依次验证启动、PCIe、USB2、PWM 和 NPU。
@@ -650,6 +651,13 @@ cargo xtask starry app board -t network-throughput -b OrangePi-5-Plus --board-co
 `wifi-network-smoke` 在取得 DHCP 地址后执行同样的双向传输。AKA 板端只有
 `wget` 时，测试会从本次 session 下载包含 `curl` 及其 musl 依赖的归档，再运行
 `upload-source` 和双向传输；无需预装 iperf 或 curl。
+
+nightly 性能用例在 `benchmarks/starry/iperf3` 提供完整 TCP 吞吐测试，直接通过
+上面的 `-t benchmark/iperf3` 命令启动板测；ostool server 持续提供 iperf3
+服务，board 配置步骤内的 `shell_cmd` 通过活动 session 的 `${boardServerIp}` 和
+`${sessionFile:iperf-bench.sh}` 获取实际地址；app 的 `init.sh` 会按现有 xtask 流程追加
+到该步骤中，下载并启动测试脚本，不依赖固定网卡、固定 IP、固定网段或额外的板测
+启动脚本。
 
 `board-common/network-test` 的 `upload-source.c` 以 128 KiB 固定块生成零数据，
 按单调时钟运行指定时长，不落盘；CMake 将其编译并把脚本安装到每次运行的 session
@@ -746,3 +754,5 @@ cargo xtask starry app qemu -t k230-qemu/qemu-k230/kpu-smoke --arch riscv64
 - `fail_regex` 保持精确，避免匹配正常输出如 `failed: 0`。
 - 不要在同一个工作区并行运行多个 `cargo xtask starry test qemu`，rootfs 和生成配置可能互相影响。
 - heavy app 不应放回 `test-suit/starryos`；迁出到 `apps/starry` 后加入 `apps/.ignore`，需要时用显式 `-t` 运行。
+
+`qemu/host-initramfs-switch-root` 的早期 `/init` 直接挂载 NVMe Ext4、移动 `/dev`、执行 `pivot_root(".", ".")` 和 `umount2(MNT_DETACH)`，读取磁盘根版本文件后再 exec 磁盘 `/sbin/init`；各步骤失败打印 errno 并令测试失败。

@@ -72,6 +72,8 @@ pub mod mem;
     feature = "ax-std"
 ))]
 pub mod net;
+#[cfg(all(feature = "nvme-qemu", feature = "ax-std", target_arch = "x86_64"))]
+pub mod nvme;
 #[cfg(all(
     feature = "ax-std",
     any(
@@ -142,6 +144,8 @@ test_runner!(
     virtio_block_lifecycle::run
 );
 test_runner!("fs-basic", run_fs_basic, fs::basic::run);
+#[cfg(target_arch = "x86_64")]
+test_runner!("nvme-qemu", run_nvme_qemu, nvme::run);
 test_runner!("iommu-dma", run_iommu_dma, iommu_dma::run);
 #[cfg(target_arch = "x86_64")]
 test_runner!("intel-itco-qemu", run_intel_itco_qemu, intel_itco::run);
@@ -280,6 +284,12 @@ const SELECTED_TESTS: &[TestCase] = &[
     ),
     #[cfg(feature = "fs-basic")]
     TestCase::new("fs-basic", "bounded filesystem operations", run_fs_basic),
+    #[cfg(all(feature = "nvme-qemu", target_arch = "x86_64"))]
+    TestCase::new(
+        "nvme-qemu",
+        "QEMU NVMe 4 KiB LBA I/O with cold-cache readback",
+        run_nvme_qemu,
+    ),
     #[cfg(feature = "iommu-dma")]
     TestCase::new(
         "iommu-dma",

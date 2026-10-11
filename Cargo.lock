@@ -73,6 +73,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "acpica-interpreter"
+version = "0.1.0"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "addr2line"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -312,6 +319,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "arceos-cpu-cpufreq"
+version = "0.1.0"
+dependencies = [
+ "ax-cpu",
+ "ax-driver",
+ "ax-runtime",
+ "ax-std",
+]
+
+[[package]]
 name = "arceos-cpu-fp-context"
 version = "0.1.0"
 dependencies = [
@@ -388,6 +405,7 @@ dependencies = [
 name = "arceos-helloworld"
 version = "0.1.0"
 dependencies = [
+ "ax-fs-ng",
  "ax-hal",
  "ax-std",
 ]
@@ -457,15 +475,23 @@ dependencies = [
 ]
 
 [[package]]
-name = "arceos-task-switch-bench"
+name = "arceos-test-acpica-interpreter"
 version = "0.1.0"
 dependencies = [
- "ax-cpu",
- "ax-memory-addr",
- "ax-mm",
- "ax-runtime",
+ "acpica-interpreter",
+ "ax-alloc",
+ "ax-hal",
  "ax-std",
- "rockchip-soc",
+]
+
+[[package]]
+name = "arceos-test-intel-hda"
+version = "0.1.0"
+dependencies = [
+ "ax-alloc",
+ "ax-driver",
+ "ax-hal",
+ "ax-std",
 ]
 
 [[package]]
@@ -475,6 +501,7 @@ dependencies = [
  "ax-alloc",
  "ax-cpu",
  "ax-driver",
+ "ax-fs-ng",
  "ax-hal",
  "ax-memory-addr",
  "ax-mm",
@@ -579,8 +606,6 @@ dependencies = [
 name = "arm_vgic"
 version = "0.6.2"
 dependencies = [
- "aarch64-cpu 11.2.0",
- "aarch64_sysreg",
  "ax-crate-interface",
  "ax-sync",
  "axdevice_base",
@@ -588,7 +613,6 @@ dependencies = [
  "bitmaps",
  "log",
  "thiserror 2.0.21",
- "tock-registers 0.10.1",
 ]
 
 [[package]]
@@ -836,6 +860,7 @@ dependencies = [
 name = "ax-cgroup"
 version = "0.3.0"
 dependencies = [
+ "ax-crate-interface",
  "ax-lazyinit",
  "ax-sync",
  "thiserror 2.0.21",
@@ -906,11 +931,12 @@ version = "0.18.1"
 dependencies = [
  "ahci-driver",
  "aic8800",
- "anyhow",
  "arm-scmi-rs",
  "arm-smmu-v3",
  "ax-alloc",
  "ax-arm-pl031",
+ "ax-crate-interface",
+ "ax-lazyinit",
  "ax-memory-addr",
  "ax-sync",
  "axklib",
@@ -924,6 +950,7 @@ dependencies = [
  "fdt-edit",
  "fxmac_rs",
  "heapless",
+ "intel-hda",
  "irq-framework",
  "log",
  "mmio-api",
@@ -932,8 +959,10 @@ dependencies = [
  "pcie",
  "phytium-mci-host",
  "rd-net",
+ "rdif-audio",
  "rdif-block",
  "rdif-clk",
+ "rdif-cpufreq",
  "rdif-display",
  "rdif-gpu",
  "rdif-input",
@@ -964,6 +993,7 @@ dependencies = [
  "sg200x-bsp",
  "sg200x-pwm",
  "sha1 0.11.0",
+ "smccc",
  "some-serial",
  "starfive-jh7110-dwmmc",
  "thiserror 2.0.21",
@@ -1300,6 +1330,7 @@ dependencies = [
  "quote",
  "rd-net",
  "rdif-block",
+ "rdif-cpufreq",
  "rdif-intc",
  "rdif-serial",
  "rdrive",
@@ -1389,13 +1420,8 @@ dependencies = [
 name = "axbacktrace"
 version = "0.4.12"
 dependencies = [
- "addr2line 0.26.1",
  "ax-lazyinit",
- "axpanic",
  "cfg-if",
- "gimli 0.33.0",
- "log",
- "paste",
 ]
 
 [[package]]
@@ -1424,7 +1450,6 @@ dependencies = [
  "ostool",
  "proc-macro2",
  "quote",
- "raw-cpuid 11.6.0",
  "regex",
  "regex-automata",
  "reqwest",
@@ -1440,8 +1465,6 @@ dependencies = [
  "tokio",
  "toml 1.1.6+spec-1.1.0",
  "tracing",
- "tracing-log",
- "tracing-subscriber",
  "walkdir",
  "windows-sys 0.59.0",
  "xz2",
@@ -1451,11 +1474,10 @@ dependencies = [
 name = "axdevice"
 version = "0.8.5"
 dependencies = [
- "ax-runtime",
+ "ax-crate-interface",
  "ax-sync",
  "axdevice_base",
  "axvm-types",
- "cfg-if",
  "divan",
  "log",
  "paste",
@@ -1490,10 +1512,10 @@ dependencies = [
 name = "axfs-ng-vfs"
 version = "0.8.1"
 dependencies = [
+ "ax-runtime",
  "ax-sync",
  "axpoll",
  "bitflags 2.13.2",
- "cfg-if",
  "hashbrown 0.16.1",
  "inherit-methods-macro",
  "log",
@@ -1531,8 +1553,7 @@ name = "axloader"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "host-boot-abi",
- "httpboot-protocol",
+ "httpboot-protocol 0.5.0",
  "object 0.38.1",
  "serde",
  "serde_json",
@@ -1660,8 +1681,8 @@ dependencies = [
 name = "axvirtio-blk"
 version = "0.4.2"
 dependencies = [
+ "ax-crate-interface",
  "ax-memory-addr",
- "ax-runtime",
  "ax-sync",
  "axaddrspace",
  "axdevice_base",
@@ -1674,8 +1695,8 @@ dependencies = [
 name = "axvirtio-common"
 version = "0.2.7"
 dependencies = [
+ "ax-crate-interface",
  "ax-memory-addr",
- "ax-runtime",
  "ax-sync",
  "axaddrspace",
  "axdevice_base",
@@ -1688,6 +1709,7 @@ dependencies = [
 name = "axvirtio-net"
 version = "0.2.1"
 dependencies = [
+ "ax-crate-interface",
  "ax-memory-addr",
  "ax-sync",
  "axaddrspace",
@@ -1704,9 +1726,12 @@ dependencies = [
  "anyhow",
  "ax-api",
  "ax-driver",
+ "ax-fs-ng",
  "ax-hal",
+ "ax-runtime",
  "ax-std",
  "axbuild",
+ "axfs-ng-vfs",
  "axtest",
  "axum",
  "axvm",
@@ -1716,14 +1741,9 @@ dependencies = [
  "futures-util",
  "heapless",
  "log",
- "prettyplease 0.3.0",
- "proc-macro2",
- "quote",
  "serde_json",
  "shlex 2.0.1",
- "syn 3.0.6",
  "tokio",
- "toml 1.1.6+spec-1.1.0",
 ]
 
 [[package]]
@@ -1803,8 +1823,6 @@ name = "axvmconfig"
 version = "0.8.9"
 dependencies = [
  "axvm-types",
- "clap",
- "env_logger",
  "log",
  "schemars",
  "serde",
@@ -2326,7 +2344,7 @@ version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3416,7 +3434,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4088,13 +4106,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "host-boot-abi"
-version = "0.1.0"
-dependencies = [
- "uefi",
-]
-
-[[package]]
 name = "http"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4144,6 +4155,16 @@ name = "httpboot-protocol"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "076fcc75bfc4540d58f6fa135dcf0a4efb95bc6afbb7fffdd3a8f125d99eb6fa"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "httpboot-protocol"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e763493125efcacde753b2728c1f9617123fd82d2b04da76a75d75a4f24e947a"
 dependencies = [
  "serde",
  "serde_json",
@@ -4496,6 +4517,16 @@ dependencies = [
  "proc-macro2-diagnostics",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "intel-hda"
+version = "0.1.0"
+dependencies = [
+ "dma-api",
+ "mmio-api",
+ "rdif-audio",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -4921,12 +4952,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ksym"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b543b77d8cfa33302b6b51b6a255f9e85b06997b7c4a0a7354fcc8304036eb09"
-
-[[package]]
 name = "ktest-helper"
 version = "0.1.1"
 dependencies = [
@@ -5343,7 +5368,7 @@ dependencies = [
  "mio",
  "nix 0.31.3",
  "serialport",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5450,7 +5475,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5699,14 +5724,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "ostool"
-version = "0.30.2"
+version = "0.30.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dcd044c5dd380e2ba7a826b5d6b4b4d3c5abe371f6bb8b40ab84581f3f5056ba"
+checksum = "c2eb5adff9cc6e134316ff354178c34d29327cafff9931a51506c6d3e60fc0ee"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5721,7 +5746,7 @@ dependencies = [
  "fitimage",
  "fs4",
  "futures",
- "httpboot-protocol",
+ "httpboot-protocol 0.4.1",
  "indicatif",
  "jkconfig 0.2.5",
  "keyring",
@@ -6308,7 +6333,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6591,6 +6616,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rdif-audio"
+version = "0.1.0"
+dependencies = [
+ "rdif-base",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "rdif-base"
 version = "0.9.1"
 dependencies = [
@@ -6616,6 +6649,14 @@ name = "rdif-clk"
 version = "0.5.7"
 dependencies = [
  "rdif-base",
+]
+
+[[package]]
+name = "rdif-cpufreq"
+version = "0.1.0"
+dependencies = [
+ "rdif-base",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -6798,6 +6839,7 @@ dependencies = [
 name = "realtek-rtl8125"
 version = "0.3.3"
 dependencies = [
+ "ax-crate-interface",
  "ax-sync",
  "dma-api",
  "log",
@@ -7177,7 +7219,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7236,7 +7278,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7856,7 +7898,6 @@ dependencies = [
  "fdt-edit",
  "fdt-raw",
  "heapless",
- "host-boot-abi",
  "kernutil",
  "libc",
  "log",
@@ -7875,6 +7916,7 @@ dependencies = [
  "tock-registers 0.10.1",
  "trait-ffi",
  "uefi",
+ "uefi-raw",
  "uguid",
  "x86",
 ]
@@ -8014,7 +8056,6 @@ dependencies = [
  "kmod-loader",
  "kmod-tools",
  "kprobe",
- "ksym",
  "linux-raw-sys 0.12.1",
  "lock_api",
  "loom",
@@ -8279,6 +8320,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "876fef147edbcbddc8ac5cbbba92c7b86519e314e86638596c09673b2ed01e7f"
 
 [[package]]
+name = "task-switch"
+version = "0.1.0"
+dependencies = [
+ "aarch64-cpu 9.4.0",
+ "ax-memory-addr",
+ "ax-mm",
+ "ax-runtime",
+ "ax-std",
+ "rockchip-soc",
+]
+
+[[package]]
 name = "tempfile"
 version = "3.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8288,7 +8341,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.5",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8320,7 +8373,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
 dependencies = [
  "rustix 1.1.5",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8525,7 +8578,6 @@ dependencies = [
  "powerfmt",
  "serde_core",
  "time-core",
- "time-macros",
 ]
 
 [[package]]
@@ -8533,16 +8585,6 @@ name = "time-core"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e1c906769ad99c88eaa54e728060edef082f8e358ff32030cb7c7d315e81109"
-
-[[package]]
-name = "time-macros"
-version = "0.2.32"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e689342a48d2ea927c87ea50cabf8594854bf940e9310208848d680d668ed85"
-dependencies = [
- "num-conv",
- "time-core",
-]
 
 [[package]]
 name = "tinystr"
@@ -8867,7 +8909,6 @@ dependencies = [
  "sharded-slab",
  "smallvec",
  "thread_local",
- "time",
  "tracing",
  "tracing-core",
  "tracing-log",
@@ -9651,7 +9692,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -9964,6 +10005,8 @@ dependencies = [
 name = "x86_vlapic"
 version = "0.5.4"
 dependencies = [
+ "ax-crate-interface",
+ "ax-sync",
  "bit",
  "log",
  "paste",

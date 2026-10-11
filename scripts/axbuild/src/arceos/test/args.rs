@@ -57,12 +57,6 @@ pub struct ArgsTestQemu {
     /// Only run C tests; prefer `--test-group c`
     #[arg(long, conflicts_with = "only_rust", hide = true)]
     pub only_c: bool,
-    /// Skip host `backtrace symbolize` after each ArceOS **rust** QEMU case.
-    #[arg(long = "no-symbolize", help_heading = "Backtrace")]
-    pub no_symbolize: bool,
-    /// Keep the QEMU backtrace capture log after successful host symbolize (default: delete).
-    #[arg(long = "keep-qemu-log", help_heading = "Backtrace")]
-    pub keep_qemu_log: bool,
 }
 
 #[derive(Args, Debug, Clone, Default)]
@@ -71,9 +65,10 @@ pub struct ArgsTestBoard {
         short = 'c',
         long = "test-case",
         value_name = "CASE",
-        help = "Run only one ArceOS board test case"
+        value_delimiter = ',',
+        help = "Run one or more ArceOS board test cases"
     )]
-    pub test_case: Option<String>,
+    pub test_case: Vec<String>,
 
     #[arg(
         long,
@@ -114,7 +109,24 @@ pub(super) fn reject_missing_qemu_target(args: &ArgsTestQemu) -> anyhow::Result<
 
 #[cfg(test)]
 mod tests {
+    use clap::Parser;
+
     use super::*;
+
+    #[derive(Parser)]
+    struct BoardCli {
+        #[command(flatten)]
+        board: ArgsTestBoard,
+    }
+
+    #[test]
+    fn board_case_selector_accepts_repeated_and_comma_separated_values() {
+        let cli =
+            BoardCli::try_parse_from(["test", "--test-case", "smoke,pmu", "--test-case", "ipi"])
+                .unwrap();
+
+        assert_eq!(cli.board.test_case, ["smoke", "pmu", "ipi"]);
+    }
 
     #[test]
     fn regular_qemu_run_still_requires_arch_or_target() {
@@ -127,8 +139,6 @@ mod tests {
             package: Vec::new(),
             only_rust: false,
             only_c: false,
-            no_symbolize: false,
-            keep_qemu_log: false,
         };
 
         let err = reject_missing_qemu_target(&args).unwrap_err();

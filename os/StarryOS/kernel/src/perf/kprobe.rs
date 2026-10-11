@@ -2,7 +2,7 @@
 //! callback ids it has attached to the probe, so `Drop` can detach.
 //!
 //! Ported from `Starry-OS/StarryOS:ebpf-kmod` (`kernel/src/perf/kprobe.rs`).
-//! Symbol resolution goes through the real in-kernel `.kallsyms` blob
+//! Symbol resolution goes through the target AXBT map
 //! (`crate::pseudofs::proc::KALLSYMS`), the same table `/proc/kallsyms` reads.
 
 use alloc::{sync::Arc, vec::Vec};
@@ -28,10 +28,11 @@ const KRETPROBE_MAX_ACTIVE: u32 = 10;
 use crate::{
     file::FileLike,
     kprobe::{
-        KernelKprobe, KernelKretprobe, KernelRawMutex, KprobeAuxiliary, UprobeTargetLease,
-        register_kprobe, register_kretprobe, unregister_kprobe, unregister_kretprobe,
+        KernelKprobe, KernelKretprobe, KprobeAuxiliary, UprobeTargetLease, register_kprobe,
+        register_kretprobe, unregister_kprobe, unregister_kretprobe,
     },
     perf::{PerfEventOps, bpf::OwnedEbpfVm},
+    sync::RawSpinLockIrqSaveBackend,
     uprobe::{KernelUprobe, unregister_uprobe},
 };
 
@@ -181,7 +182,7 @@ impl CallBackFunc for KprobePerfCallBack {
 }
 
 fn lookup_symbol_addr(symbol: &str) -> StarryResult<usize> {
-    // Resolve against the real in-kernel `.kallsyms` blob (the same table
+    // Resolve against the target map (the same table
     // `/proc/kallsyms` is built from) rather than a separate stub.
     crate::pseudofs::proc::KALLSYMS
         .get()
@@ -204,11 +205,11 @@ fn perf_probe_arg_to_kprobe_builder(
 
 fn perf_probe_arg_to_kretprobe_builder(
     args: &PerfProbeArgs,
-) -> StarryResult<KretprobeBuilder<KernelRawMutex>> {
+) -> StarryResult<KretprobeBuilder<RawSpinLockIrqSaveBackend>> {
     let symbol = &args.name;
     let addr = lookup_symbol_addr(symbol)?;
     Ok(
-        KretprobeBuilder::<KernelRawMutex>::new(KRETPROBE_MAX_ACTIVE)
+        KretprobeBuilder::<RawSpinLockIrqSaveBackend>::new(KRETPROBE_MAX_ACTIVE)
             .with_symbol(symbol.clone())
             .with_symbol_addr(addr),
     )

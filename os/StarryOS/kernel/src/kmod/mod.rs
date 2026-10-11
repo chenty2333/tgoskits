@@ -11,9 +11,9 @@
 //!
 //! Package-name imports adapted to tgoskits (`axhal` → `ax_runtime::hal`,
 //! `axalloc` → `ax_alloc`, `axmm` → `ax_mm`, `kspin` → `ax_sync`) per
-//! `crate-fork-audit.md §6`. KALLSYMS lookup goes through the in-kernel
-//! `.kallsyms` blob (`crate::pseudofs::proc::KALLSYMS`), the same table
-//! `perf::kprobe` resolves names against.
+//! `crate-fork-audit.md §6`. KALLSYMS lookup goes through the target AXBT
+//! map (`crate::pseudofs::proc::KALLSYMS`), the same table `perf::kprobe`
+//! resolves names against.
 
 mod kprint;
 mod kshim;
@@ -34,7 +34,7 @@ use ax_memory_addr::{PAGE_SIZE_4K, VirtAddr};
 use ax_runtime::hal::paging::MappingFlags;
 use kmod_loader::{KernelModuleHelper, ModuleLoader, ModuleOwner, SectionMemOps};
 
-use crate::{Errno, StarryError, StarryResult, sync::NoPreemptMutex};
+use crate::{Errno, StarryError, StarryResult, sync::RawSpinLock};
 
 /// Marker type that satisfies `kmod_loader::KernelModuleHelper`. Stateless —
 /// every operation reaches into the tgoskits subsystems directly.
@@ -216,7 +216,7 @@ impl KernelModuleHelper for KmodHelper {
         if name.is_empty() {
             return None;
         }
-        // Resolve against the real in-kernel `.kallsyms` blob (the same table
+        // Resolve against the target map (the same table
         // `/proc/kallsyms` is built from), matching `perf::kprobe`'s lookup.
         match crate::pseudofs::proc::KALLSYMS
             .get()
@@ -244,7 +244,7 @@ impl KernelModuleHelper for KmodHelper {
 type Module = ModuleOwner<KmodHelper>;
 
 /// Registry of currently-loaded modules, keyed by `modinfo` name.
-static MODULES: NoPreemptMutex<BTreeMap<String, Module>> = NoPreemptMutex::new(BTreeMap::new());
+static MODULES: RawSpinLock<BTreeMap<String, Module>> = RawSpinLock::new(BTreeMap::new());
 
 /// Linux-style `init_module(2)`: take a `.ko` image and an optional
 /// parameter string, perform relocations, run the module's `init`

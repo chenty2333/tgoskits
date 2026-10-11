@@ -19,6 +19,10 @@ pub(crate) struct StarryAppCase {
     pub(crate) case_dir: PathBuf,
     pub(crate) prebuild_path: Option<PathBuf>,
     pub(crate) requires: Vec<String>,
+    /// Whether the case lives under `benchmarks/starry`. Benchmark cases
+    /// are nightly-only measurements: they never join `app qemu --all` and run
+    /// only when selected explicitly as `benchmark/<case>`.
+    pub(crate) benchmark: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,7 +48,6 @@ pub(crate) struct StarryAppQemuCase {
     pub(crate) rootfs_write_policy: crate::rootfs::qemu::RootfsWritePolicy,
     pub(crate) test_commands: Vec<String>,
     pub(crate) grouped_command_selection: GroupedCommandSelection,
-    pub(crate) host_symbolize_success_regex: Vec<String>,
     pub(crate) host_http_server: Option<HostHttpServerConfig>,
     pub(crate) subcases: Vec<TestQemuSubcase>,
 }
