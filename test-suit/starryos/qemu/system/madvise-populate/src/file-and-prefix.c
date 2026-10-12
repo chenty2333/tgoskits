@@ -1,12 +1,10 @@
-// Explicit prefaulting is observable before userspace touches the mapping.
+// Supplemental file and partial-progress coverage absent from madv_populate.c.
 #define _GNU_SOURCE
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
-#include <sys/wait.h>
 #include <unistd.h>
 
 #ifndef MADV_POPULATE_READ
@@ -36,33 +34,6 @@ static int resident(void *addr)
     unsigned char value;
     CHECK(syscall(SYS_mincore, addr, page, &value) == 0);
     return value & 1;
-}
-
-static void anonymous_and_cow(void)
-{
-    unsigned char *base = mmap(NULL, 2 * page, PROT_READ | PROT_WRITE,
-                               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    CHECK(base != MAP_FAILED);
-    CHECK(!resident(base) && !resident(base + page));
-    advise(base, page, MADV_POPULATE_READ);
-    CHECK(resident(base) && !resident(base + page));
-    CHECK(base[0] == 0);
-    advise(base + page, page, MADV_POPULATE_WRITE);
-    CHECK(resident(base + page));
-    memset(base, 0x5a, 2 * page);
-    pid_t child = fork();
-    CHECK(child >= 0);
-    if (child == 0) {
-        advise(base, 2 * page, MADV_POPULATE_WRITE);
-        CHECK(base[0] == 0x5a && base[page] == 0x5a);
-        memset(base, 0xa5, 2 * page);
-        _exit(0);
-    }
-    int status;
-    CHECK(waitpid(child, &status, 0) == child);
-    CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
-    CHECK(base[0] == 0x5a && base[page] == 0x5a);
-    CHECK(munmap(base, 2 * page) == 0);
 }
 
 static void errors_preserve_completed_prefix(void)
@@ -120,9 +91,8 @@ static void file_backing_errors(void)
 int main(void)
 {
     page = (size_t)sysconf(_SC_PAGESIZE);
-    anonymous_and_cow();
     errors_preserve_completed_prefix();
     file_backing_errors();
-    puts("MADVISE_POPULATE_PASSED");
+    puts("MADVISE_POPULATE_SUPPLEMENT_PASSED");
     return 0;
 }

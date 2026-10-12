@@ -36,10 +36,14 @@ resolve_page_fault_plan → prepare/apply/TLB acknowledgement`。
 
 ## 必要验证与限制
 
-系统测试 `qemu/system/madvise-populate` 用 mincore 在用户访问前观察填充，
-并验证父子 COW 隔离、权限错误、空洞后缀不被处理、文件 EOF 和共享文件。
+系统测试 `qemu/system/madvise-populate` 优先复用 Linux v6.12 的
+`madv_populate.c`，保留权限、空洞及匿名填充的 16 项核心断言。因 Starry
+尚无 pagemap，匿名驻留通过 mincore 观察；soft-dirty 子测试不在此适配范围，
+不宣称原版完整自测通过。来源、许可与差异见
+[测试适配说明](../../test-suit/starryos/qemu/system/madvise-populate/README.md)。
+补充程序只检查上游自测没有覆盖的文件与部分进展语义。
 内核测试直接确认 READ 不破坏共享 COW，WRITE 在用户写入前已经建立
-独立可写页，取消不发布页修改。沿项目入口运行，宿主 Linux 使用同一 C 测试。
+独立可写页，取消不发布页修改。沿项目入口运行，宿主 Linux 使用同一组测试。
 
 这属于 MM/用户 ABI 高风险功能，合入仍须领域维护者审查。未实现的
 HWPOISON、secretmem 等底层能力不由本提交补齐；不得把其不存在的路径
