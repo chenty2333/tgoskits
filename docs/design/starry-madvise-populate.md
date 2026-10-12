@@ -17,7 +17,9 @@ READ 要求可读，WRITE 要求可写且预先解除 COW；空洞返回 ENOMEM�
 
 `sys_madvise → MmPin::populate_advised_range → plan_page_fault →
 resolve_page_fault_plan → prepare/apply/TLB acknowledgement`。
-每个基本页的类型/权限检查和缺页计划在同一次 MM 锁持有期间完成；
+每个基本页的类型/权限检查和缺页计划在同一次 MM 锁持有期间完成。
+权限准入读取 `VmaEntry::reported_rights` 中用户请求的权限，而不是为页表扩展的
+硬件权限；因此仅 PROT_WRITE 的映射不能接受 POPULATE_READ。
 锁外执行分配和文件 I/O，锁内 apply 复核已有 VMA epoch/PTE preimage。
 冲突后重新取得计划并复核权限，沿既有取消路径释放未发布资源；
 已发布的 TLB 义务沿既有 receipt 完成，不引入另一套页登记表。

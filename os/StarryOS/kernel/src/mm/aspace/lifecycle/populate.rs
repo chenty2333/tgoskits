@@ -45,7 +45,10 @@ impl MmPin {
                     .vma_root
                     .lookup_entry(cursor)
                     .ok_or(StarryError::NoMemory)?;
-                if entry.operation().is_linear() || !entry.rights().contains(required) {
+                // Linux prefault admission uses the requested VMA access,
+                // not the readable PTE permission added for PROT_WRITE-only
+                // mappings by the architecture's hardware permission rules.
+                if entry.operation().is_linear() || !entry.reported_rights().contains(required) {
                     return Err(StarryError::InvalidInput);
                 }
                 // Admission and the VMA/PTE snapshot share one lock hold.
