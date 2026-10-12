@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.20)
+project(madvise-populate C)
+add_executable(madvise-populate src/main.c)
+target_compile_options(madvise-populate PRIVATE -Wall -Wextra -Werror)
+install(TARGETS madvise-populate RUNTIME DESTINATION usr/bin/starry-test-suit)
