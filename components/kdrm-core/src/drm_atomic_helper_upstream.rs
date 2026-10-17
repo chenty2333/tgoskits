@@ -8,7 +8,7 @@
 
 #![allow(non_snake_case, non_camel_case_types, non_upper_case_globals)]
 
-use core::ffi::c_void;
+use core::{ffi::c_void, mem::offset_of};
 
 use drm_kapi::{
     completion::Completion,
@@ -217,13 +217,15 @@ unsafe fn init_commit(commit: *mut DrmCrtcCommit, crtc: *mut DrmCrtc) {
 }
 
 /// # Safety
-/// `completion` must point to the `flip_done` field embedded at offset 16 within a valid `DrmCrtcCommit` allocation.
+/// `completion` must point to the `flip_done` field of a valid `DrmCrtcCommit` allocation.
 unsafe extern "C" fn release_crtc_commit(completion: *mut Completion) {
-    // SAFETY: Relies on `completion` pointing to `flip_done` embedded at offset 16 within
-    // `DrmCrtcCommit`. Subtracting 16 recovers the enclosing `*mut DrmCrtcCommit` whose reference
-    // count is then decremented via `drm_crtc_commit_put`. Note: this assumes a fixed struct layout.
+    // SAFETY: `completion` is the `flip_done` field of a live `DrmCrtcCommit` (function contract),
+    // so stepping back by its offset recovers the commit whose reference is dropped here.
     unsafe {
-        let commit = (completion as *mut u8).sub(16) as *mut DrmCrtcCommit;
+        let commit = completion
+            .cast::<u8>()
+            .sub(offset_of!(DrmCrtcCommit, flip_done))
+            .cast::<DrmCrtcCommit>();
         drm_crtc_commit_put(commit);
     }
 }
@@ -2109,12 +2111,15 @@ unsafe fn commit_tail(state: *mut DrmAtomicCommit) {
 
 // upstream: drm_atomic_helper.c commit_work()
 /// # Safety
-/// `work` must point to the `work` field embedded at offset 96 within a live `DrmAtomicCommit`.
+/// `work` must point to the `commit_work` field of a live `DrmAtomicCommit`.
 unsafe extern "C" fn commit_work(work: *mut WorkStruct) {
-    // SAFETY: Assumes `work` is embedded at offset 96 inside a live `DrmAtomicCommit`.
-    // Pointer subtraction recovers `state` to invoke `commit_tail`. Note: assumes fixed struct layout.
+    // SAFETY: `work` is the `commit_work` field of a live `DrmAtomicCommit` (function contract),
+    // so stepping back by its offset recovers the state passed to `commit_tail`.
     unsafe {
-        let state = (work as *mut u8).sub(96) as *mut DrmAtomicCommit;
+        let state = work
+            .cast::<u8>()
+            .sub(offset_of!(DrmAtomicCommit, commit_work))
+            .cast::<DrmAtomicCommit>();
         commit_tail(state);
     }
 }
@@ -2334,7 +2339,10 @@ unsafe fn stall_checks(crtc: *mut DrmCrtc, nonblock: bool) -> i32 {
         let head = core::ptr::addr_of_mut!((*crtc).commit_list);
         let mut cur = (*head).next;
         while cur != head {
-            let commit = (cur as *mut u8).sub(112) as *mut DrmCrtcCommit;
+            let commit = cur
+                .cast::<u8>()
+                .sub(offset_of!(DrmCrtcCommit, commit_entry))
+                .cast::<DrmCrtcCommit>();
             if i == 0 {
                 completed = (*commit).flip_done.try_wait();
                 if !completed && nonblock {
@@ -3688,7 +3696,10 @@ pub unsafe extern "C" fn drm_atomic_helper_disable_all(
         let mut cur = (*head).next;
         let mut ret: i32;
         while cur != head {
-            let crtc = (cur as *mut u8).sub(16) as *mut DrmCrtc;
+            let crtc = cur
+                .cast::<u8>()
+                .sub(offset_of!(DrmCrtc, head))
+                .cast::<DrmCrtc>();
             let crtc_state = crate::drm_atomic_upstream::drm_atomic_get_crtc_state(state, crtc);
             if IS_ERR(crtc_state) {
                 ret = PTR_ERR(crtc_state);
@@ -3863,7 +3874,10 @@ pub unsafe extern "C" fn drm_atomic_helper_duplicate_state(
         let head = core::ptr::addr_of_mut!((*dev).mode_config.crtc_list);
         let mut cur = (*head).next;
         while cur != head {
-            let crtc = (cur as *mut u8).sub(16) as *mut DrmCrtc;
+            let crtc = cur
+                .cast::<u8>()
+                .sub(offset_of!(DrmCrtc, head))
+                .cast::<DrmCrtc>();
             let crtc_state = crate::drm_atomic_upstream::drm_atomic_get_crtc_state(state, crtc);
             if IS_ERR(crtc_state) {
                 let err = PTR_ERR(crtc_state);
