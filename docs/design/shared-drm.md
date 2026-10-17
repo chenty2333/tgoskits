@@ -27,6 +27,21 @@ UAPI 定义不能因 `card0` 替换而失效。
 本改动涉及用户 ABI、并发和 `unsafe` 对象生命周期，按高风险功能处理。该文档和代码需要
 在合入前接受领域审查；宿主测试和 QEMU 结果不代替安全与设计审查。
 
+### 1.3 审阅导航
+
+- **移植算法**：`components/kdrm-core/src/*_upstream.rs` 按 Linux 7.2.3 对应 DRM
+  源文件组织，`// upstream:` 标记对应函数，`*_types.rs` 保存所需的 C 布局类型。这是
+  Rust 移植，不是原样编译 Linux 源码；名称与布局对应不能代替引用、别名和锁语义的核对。
+- **系统适配**：`components/drm-kapi` 提供 DRM 所需的内核机制与服务接口，
+  `axdrm/src/runtime` 和 Starry 提供实际运行时；`axdrm/src/backend` 将驱动回调接到
+  既有 RDIF 设备。重点检查服务契约、错误传播及 GEM、VMA、DMA backing 的引用配对，
+  不把这一层视为无行为的转发包装。
+- **有意改写**：阻塞 atomic 提交增加可失败的 `atomic_commit_pre_swap`，非阻塞提交
+  失败走 `drm_atomic_helper_commit_error`（见 3.2）；GPU 完成通知转交工作队列后再运行
+  fence 回调。`hrtimer` 按 10 ms jiffy 向上取整（见 2.1）；`drm-kapi/src/rcu.rs`
+  使用全局读者计数，并为回收回调创建任务等待读者归零。这些是本地机制，不应据此推断
+  与 Linux 相同的调度、精度或性能保证。
+
 ## 2. 分层
 
 DRM UAPI、驱动资源和操作系统状态分别有一个所有者。`kdrm-core` 不依赖 Starry、ArceOS
