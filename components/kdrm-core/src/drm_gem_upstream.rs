@@ -6,14 +6,12 @@
 //! handles, names/flink, mmap offset allocation through `drm_vma_manager`,
 //! LRU management, and dma-resv locking helpers.
 
-#![allow(non_snake_case)]
-
 use core::ffi::{c_char, c_int, c_long, c_uint, c_ulong, c_void};
 
 use drm_kapi::{
     config::{EINVAL, ENOMEM, EOPNOTSUPP, GFP_KERNEL},
     dma_resv::{dma_resv_fini, dma_resv_init},
-    list::{INIT_LIST_HEAD, list_add_tail, list_del_init, list_empty},
+    list::{init_list_head, list_add_tail, list_del_init, list_empty},
     locks::{spin_lock, spin_unlock},
     memory::{kfree, kmalloc, kref_init, kref_put},
     mutex::{mutex_init, mutex_lock, mutex_unlock},
@@ -101,9 +99,9 @@ pub unsafe extern "C" fn drm_gem_private_object_init(
         core::ptr::write_bytes(core::ptr::addr_of_mut!((*obj).vma_node.vm_lock), 0, 1);
         (*obj).vma_node.vm_files.node = core::ptr::null_mut();
         (*obj).vma_node.driver_private = core::ptr::null_mut();
-        INIT_LIST_HEAD(core::ptr::addr_of_mut!((*obj).gpuva.list));
+        init_list_head(core::ptr::addr_of_mut!((*obj).gpuva.list));
         mutex_init(core::ptr::addr_of_mut!((*obj).gpuva.lock));
-        INIT_LIST_HEAD(core::ptr::addr_of_mut!((*obj).lru_node));
+        init_list_head(core::ptr::addr_of_mut!((*obj).lru_node));
         (*obj).resv = core::ptr::addr_of_mut!((*obj)._resv);
         dma_resv_init((*obj).resv);
     }
@@ -1268,7 +1266,7 @@ pub unsafe extern "C" fn drm_gem_lru_init(lru: *mut DrmGemLru) {
         // SAFETY: `lru` is checked non-null; initialize intrusive list head and zero count.
         unsafe {
             (*lru).count = 0;
-            INIT_LIST_HEAD(core::ptr::addr_of_mut!((*lru).list));
+            init_list_head(core::ptr::addr_of_mut!((*lru).list));
         }
     }
 }
@@ -1604,7 +1602,7 @@ mod tests {
             // Export the real GEM object so the PRIME handle owns a real
             // DMA-BUF file reference rather than a synthetic struct field.
             let dmabuf = crate::drm_prime_upstream::drm_gem_prime_export(obj, 0);
-            assert!(!drm_kapi::config::IS_ERR(dmabuf));
+            assert!(!drm_kapi::config::is_err(dmabuf));
             assert!(!dmabuf.is_null());
             assert_eq!(drm_kapi::memory::kref_read(&(*obj).refcount), 3);
 

@@ -232,8 +232,7 @@ pub fn for_each_set_bit(word: u64, limit: u32) -> impl Iterator<Item = u32> {
 }
 
 #[inline]
-#[allow(non_snake_case)]
-pub fn IS_ALIGNED<V: BitWord, A: BitWord>(value: V, alignment: A) -> bool {
+pub fn is_aligned<V: BitWord, A: BitWord>(value: V, alignment: A) -> bool {
     let alignment = alignment.to_u64();
     alignment != 0 && value.to_u64() & (alignment - 1) == 0
 }
@@ -403,6 +402,6 @@ mod tests {
         assert_eq!(bit(8), 0x100);
         assert_eq!(lower_32_bits(0x1234_5678_9abc_def0u64), 0x9abc_def0);
         assert_eq!(upper_32_bits(0x1234_5678_9abc_def0u64), 0x1234_5678);
-        assert!(IS_ALIGNED(0x4000usize, 0x1000usize));
+        assert!(is_aligned(0x4000usize, 0x1000usize));
     }
 }

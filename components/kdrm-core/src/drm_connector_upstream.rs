@@ -16,8 +16,6 @@
 //!   Hosts may use the shared mode parser before publishing connector policy.
 //! - `i2c_adapter` arguments are passed as opaque `*mut c_void`.
 
-#![allow(non_snake_case, non_upper_case_globals)]
-
 use core::{
     cell::UnsafeCell,
     ffi::{c_char, c_void},
@@ -30,7 +28,7 @@ use drm_kapi::{
     config::{EFAULT, EINVAL, ENOENT, ENOMEM, EOPNOTSUPP, GFP_KERNEL},
     drm_err,
     idr::{Ida, ida_alloc_range, ida_destroy, ida_free, ida_init},
-    list::{INIT_LIST_HEAD, list_add_tail, list_del, list_del_init, list_empty},
+    list::{init_list_head, list_add_tail, list_del, list_del_init, list_empty},
     locks::{spin_lock_irq, spin_lock_irqsave, spin_unlock_irq, spin_unlock_irqrestore},
     memory::{kfree, kzalloc},
     mm_native::copy_to_user_c,
@@ -193,7 +191,7 @@ unsafe fn connector_globals_ensure() {
         ida_init(unsafe { &mut *ida.add(i) });
     }
     // SAFETY: `CONNECTOR_GLOBALS.list` is static storage for a `ListHead` that is initialised in place here, before the ready flag is set, per the function's one-time initialisation contract.
-    unsafe { INIT_LIST_HEAD(CONNECTOR_GLOBALS.list.get().cast()) };
+    unsafe { init_list_head(CONNECTOR_GLOBALS.list.get().cast()) };
     // SAFETY: `CONNECTOR_GLOBALS.list_lock` is static storage for a `Mutex` that is initialised in place here, before any use, per the function's one-time initialisation contract.
     unsafe { mutex_init(CONNECTOR_GLOBALS.list_lock.get().cast::<Mutex>()) };
     CONNECTOR_GLOBALS.ready.store(true, Ordering::Release);
@@ -458,12 +456,12 @@ unsafe fn drm_connector_init_only(
         }
 
         (*connector).ddc = ddc;
-        INIT_LIST_HEAD(core::ptr::addr_of_mut!((*connector).head));
-        INIT_LIST_HEAD(core::ptr::addr_of_mut!(
+        init_list_head(core::ptr::addr_of_mut!((*connector).head));
+        init_list_head(core::ptr::addr_of_mut!(
             (*connector).global_connector_list_entry
         ));
-        INIT_LIST_HEAD(core::ptr::addr_of_mut!((*connector).probed_modes));
-        INIT_LIST_HEAD(core::ptr::addr_of_mut!((*connector).modes));
+        init_list_head(core::ptr::addr_of_mut!((*connector).probed_modes));
+        init_list_head(core::ptr::addr_of_mut!((*connector).modes));
         mutex_init(core::ptr::addr_of_mut!((*connector).mutex));
         mutex_init(core::ptr::addr_of_mut!((*connector).cec.mutex));
         mutex_init(core::ptr::addr_of_mut!((*connector).eld_mutex));
@@ -1275,7 +1273,7 @@ unsafe fn __drm_connector_put_safe(conn: *mut DrmConnector) {
             core::ptr::addr_of_mut!((*config).connector_free_list),
         );
         drm_kapi::workqueue::queue_work(
-            drm_kapi::workqueue::system_dfl_wq,
+            drm_kapi::workqueue::SYSTEM_DFL_WQ,
             core::ptr::addr_of_mut!((*config).connector_free_work),
         );
     }
@@ -3067,11 +3065,18 @@ unsafe fn drm_mode_expose_to_userspace(
 ) -> bool {
     // SAFETY: Check whether display mode is stereo and permitted for caller.
     unsafe {
-        if !(*file_priv).stereo_allowed && drm_mode_is_stereo(mode) {
+        if !(*file_priv)
+            .stereo_allowed
+            .load(core::sync::atomic::Ordering::Relaxed)
+            && drm_mode_is_stereo(mode)
+        {
             return false;
         }
 
-        if !(*file_priv).aspect_ratio_allowed {
+        if !(*file_priv)
+            .aspect_ratio_allowed
+            .load(core::sync::atomic::Ordering::Relaxed)
+        {
             let head = modes as *mut ListHead;
             let mut cur = (*head).next;
             while cur != head {
@@ -3212,7 +3217,10 @@ pub unsafe extern "C" fn drm_mode_getconnector(
                     }
                     (*mode).expose_to_userspace = false;
                     drm_mode_convert_to_umode(&mut u_mode, mode);
-                    if !(*file_priv).aspect_ratio_allowed {
+                    if !(*file_priv)
+                        .aspect_ratio_allowed
+                        .load(core::sync::atomic::Ordering::Relaxed)
+                    {
                         u_mode.flags &= !DRM_MODE_FLAG_PIC_AR_MASK;
                     }
                     if copy_to_user_c(
@@ -3265,8 +3273,12 @@ pub unsafe extern "C" fn drm_mode_getconnector(
 
             ret = drm_mode_object_get_properties(
                 core::ptr::addr_of_mut!((*connector).base),
-                (*file_priv).atomic,
-                (*file_priv).plane_color_pipeline,
+                (*file_priv)
+                    .atomic
+                    .load(core::sync::atomic::Ordering::Relaxed),
+                (*file_priv)
+                    .plane_color_pipeline
+                    .load(core::sync::atomic::Ordering::Relaxed),
                 (*out_resp).props_ptr as usize as *mut u32,
                 (*out_resp).prop_values_ptr as usize as *mut u64,
                 core::ptr::addr_of_mut!((*out_resp).count_props),
@@ -3318,10 +3330,10 @@ pub unsafe extern "C" fn drm_connector_find_by_fwnode(fwnode: *mut c_void) -> *m
     // SAFETY: `fwnode` is compared only as an identity key and never dereferenced; the global list is walked under `list_lock`, which is held until the walk ends.
     unsafe {
         if fwnode.is_null() {
-            return ERR_PTR_C(-ENODEV);
+            return err_ptr_c(-ENODEV);
         }
 
-        let mut found: *mut DrmConnector = ERR_PTR_C(-ENODEV);
+        let mut found: *mut DrmConnector = err_ptr_c(-ENODEV);
         connector_globals_ensure();
         mutex_lock(CONNECTOR_GLOBALS.list_lock.get().cast::<Mutex>());
         let head = CONNECTOR_GLOBALS.list.get().cast::<ListHead>();
@@ -3356,10 +3368,10 @@ pub unsafe extern "C" fn drm_connector_oob_hotplug_event(
     connector_fwnode: *mut c_void,
     status: DrmConnectorStatus,
 ) {
-    // SAFETY: `connector_fwnode` is used only as a lookup key; the result of `drm_connector_find_by_fwnode` is checked with `IS_ERR_C` before its `funcs` table is read.
+    // SAFETY: `connector_fwnode` is used only as a lookup key; the result of `drm_connector_find_by_fwnode` is checked with `is_err_c` before its `funcs` table is read.
     unsafe {
         let connector = drm_connector_find_by_fwnode(connector_fwnode);
-        if IS_ERR_C(connector) {
+        if is_err_c(connector) {
             return;
         }
 
@@ -3371,14 +3383,14 @@ pub unsafe extern "C" fn drm_connector_oob_hotplug_event(
     }
 }
 
-/// `IS_ERR()` in pointer form.
-fn IS_ERR_C<T>(ptr: *mut T) -> bool {
-    drm_kapi::config::IS_ERR(ptr)
+/// `is_err()` in pointer form.
+fn is_err_c<T>(ptr: *mut T) -> bool {
+    drm_kapi::config::is_err(ptr)
 }
 
-/// `ERR_PTR()` in pointer form.
-fn ERR_PTR_C<T>(error: i32) -> *mut T {
-    drm_kapi::config::ERR_PTR::<T>(error)
+/// `err_ptr()` in pointer form.
+fn err_ptr_c<T>(error: i32) -> *mut T {
+    drm_kapi::config::err_ptr::<T>(error)
 }
 
 // upstream: drm_connector.c drm_tile_group_free()
@@ -3541,7 +3553,7 @@ pub extern "C" fn drm_get_dp_subconnector_name(val: i32) -> *const c_char {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{test_support::TestDrm, uapi_drm_consts::DRM_MODE_CONNECTOR_DisplayPort};
+    use crate::{test_support::TestDrm, uapi_drm_consts::DRM_MODE_CONNECTOR_DISPLAYPORT};
 
     /// # Safety
     ///
@@ -3596,7 +3608,7 @@ mod tests {
         let mut conn: DrmConnector = unsafe { core::mem::zeroed() };
         // SAFETY: Unit test initializes connector with dummy callbacks and verifies error handling.
         unsafe {
-            let ret = drm_connector_init(dev, &mut conn, &f, DRM_MODE_CONNECTOR_DisplayPort as i32);
+            let ret = drm_connector_init(dev, &mut conn, &f, DRM_MODE_CONNECTOR_DISPLAYPORT as i32);
             assert_eq!(ret, 0);
             assert!(conn.connector_type_id > 0);
             assert_eq!(type_id_from_name(&mut conn), conn.connector_type_id);
@@ -3630,11 +3642,11 @@ mod tests {
         // SAFETY: Unit test exercises connector list iteration on mock connectors.
         unsafe {
             assert_eq!(
-                drm_connector_init(dev, &mut a, &f, DRM_MODE_CONNECTOR_DisplayPort as i32),
+                drm_connector_init(dev, &mut a, &f, DRM_MODE_CONNECTOR_DISPLAYPORT as i32),
                 0
             );
             assert_eq!(
-                drm_connector_init(dev, &mut b, &f, DRM_MODE_CONNECTOR_DisplayPort as i32),
+                drm_connector_init(dev, &mut b, &f, DRM_MODE_CONNECTOR_DISPLAYPORT as i32),
                 0
             );
             // The per-type IDA is process-global and can already contain IDs
@@ -3680,7 +3692,7 @@ mod tests {
         // SAFETY: Unit test exercises connector registration and cleanup on mock connector.
         unsafe {
             assert_eq!(
-                drm_connector_init(dev, &mut conn, &f, DRM_MODE_CONNECTOR_DisplayPort as i32),
+                drm_connector_init(dev, &mut conn, &f, DRM_MODE_CONNECTOR_DISPLAYPORT as i32),
                 0
             );
 
@@ -3727,7 +3739,7 @@ mod tests {
                 "BT601_YCC"
             );
             assert_eq!(
-                name(drm_get_connector_type_name(DRM_MODE_CONNECTOR_DisplayPort)),
+                name(drm_get_connector_type_name(DRM_MODE_CONNECTOR_DISPLAYPORT)),
                 "DP"
             );
         }

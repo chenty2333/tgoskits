@@ -6,8 +6,6 @@
 //! softirq/timer-wheel implementation; callbacks are never run inline from
 //! `mod_timer()`.
 
-#![allow(non_snake_case)]
-
 use alloc::string::String;
 use core::{
     ffi::c_ulong,

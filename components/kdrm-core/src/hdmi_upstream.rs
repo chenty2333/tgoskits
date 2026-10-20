@@ -5,8 +5,6 @@
 //! Handles initialization, validation, packing, unpacking, and logging of
 //! HDMI Infoframes: AVI, SPD, Audio, Vendor (HDMI VSIF), DRM.
 
-#![allow(non_snake_case)]
-
 use core::{
     cmp::min,
     ffi::{c_char, c_void},
@@ -502,10 +500,10 @@ pub unsafe extern "C" fn hdmi_audio_infoframe_pack_for_dp(
     let sdp_ref = unsafe { &mut *sdp };
     sdp_ref.db.fill(0);
 
-    sdp_ref.sdp_header.HB0 = 0;
-    sdp_ref.sdp_header.HB1 = frame_ref.r#type as u8;
-    sdp_ref.sdp_header.HB2 = DP_SDP_AUDIO_INFOFRAME_HB2;
-    sdp_ref.sdp_header.HB3 = (dp_version & 0x3f) << 2;
+    sdp_ref.sdp_header.hb0 = 0;
+    sdp_ref.sdp_header.hb1 = frame_ref.r#type as u8;
+    sdp_ref.sdp_header.hb2 = DP_SDP_AUDIO_INFOFRAME_HB2;
+    sdp_ref.sdp_header.hb3 = (dp_version & 0x3f) << 2;
 
     hdmi_audio_infoframe_pack_payload(frame_ref, &mut sdp_ref.db);
 

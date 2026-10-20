@@ -16,8 +16,6 @@
 //! - The leaked-framebuffer dump prints only the id; the full
 //!   `drm_framebuffer_print_info()` dump depends on the print helpers.
 
-#![allow(non_snake_case)]
-
 use core::{
     ffi::{c_char, c_void},
     mem::{offset_of, size_of},
@@ -26,10 +24,10 @@ use core::{
 use drm_kapi::{
     assert::warn_on,
     config::{EFAULT, ENOMEM, EOPNOTSUPP},
-    list::{INIT_LIST_HEAD, list_empty},
+    list::{init_list_head, list_empty},
     mutex::mutex_init,
     types::{Kref, ListHead},
-    workqueue::{INIT_WORK_C, c_flush_work},
+    workqueue::{c_flush_work, init_work_c},
 };
 
 use crate::{
@@ -342,7 +340,9 @@ pub unsafe extern "C" fn drm_mode_getresources(
             if connector.is_null() {
                 break;
             }
-            if !(*file_priv).writeback_connectors
+            if !(*file_priv)
+                .writeback_connectors
+                .load(core::sync::atomic::Ordering::Relaxed)
                 && (*connector).connector_type == DRM_MODE_CONNECTOR_WRITEBACK as i32
             {
                 continue;
@@ -683,15 +683,15 @@ pub unsafe extern "C" fn drmm_mode_config_init(dev: *mut DrmDevice) -> i32 {
         mutex_init(core::ptr::addr_of_mut!((*mc).fb_lock));
         mutex_init(core::ptr::addr_of_mut!((*mc).blob_lock));
 
-        INIT_LIST_HEAD(core::ptr::addr_of_mut!((*mc).fb_list));
-        INIT_LIST_HEAD(core::ptr::addr_of_mut!((*mc).crtc_list));
-        INIT_LIST_HEAD(core::ptr::addr_of_mut!((*mc).connector_list));
-        INIT_LIST_HEAD(core::ptr::addr_of_mut!((*mc).encoder_list));
-        INIT_LIST_HEAD(core::ptr::addr_of_mut!((*mc).property_list));
-        INIT_LIST_HEAD(core::ptr::addr_of_mut!((*mc).property_blob_list));
-        INIT_LIST_HEAD(core::ptr::addr_of_mut!((*mc).plane_list));
-        INIT_LIST_HEAD(core::ptr::addr_of_mut!((*mc).colorop_list));
-        INIT_LIST_HEAD(core::ptr::addr_of_mut!((*mc).privobj_list));
+        init_list_head(core::ptr::addr_of_mut!((*mc).fb_list));
+        init_list_head(core::ptr::addr_of_mut!((*mc).crtc_list));
+        init_list_head(core::ptr::addr_of_mut!((*mc).connector_list));
+        init_list_head(core::ptr::addr_of_mut!((*mc).encoder_list));
+        init_list_head(core::ptr::addr_of_mut!((*mc).property_list));
+        init_list_head(core::ptr::addr_of_mut!((*mc).property_blob_list));
+        init_list_head(core::ptr::addr_of_mut!((*mc).plane_list));
+        init_list_head(core::ptr::addr_of_mut!((*mc).colorop_list));
+        init_list_head(core::ptr::addr_of_mut!((*mc).privobj_list));
 
         idr_init_base(core::ptr::addr_of_mut!((*mc).object_idr), 1);
         idr_init_base(core::ptr::addr_of_mut!((*mc).tile_idr), 1);
@@ -699,16 +699,16 @@ pub unsafe extern "C" fn drmm_mode_config_init(dev: *mut DrmDevice) -> i32 {
 
         drm_kapi::locks::spin_lock_init(&mut (*mc).connector_list_lock);
         drm_kapi::list::init_llist_head(core::ptr::addr_of_mut!((*mc).connector_free_list));
-        // INIT_WORK(&connector_free_work, drm_connector_free_work_fn)
+        // init_work(&connector_free_work, drm_connector_free_work_fn)
         let work = core::ptr::addr_of_mut!((*mc).connector_free_work);
         if drm_kapi::workqueue::init_workqueue_executor().is_ok() {
-            INIT_WORK_C(&mut *work, drm_connector_free_work_fn);
+            init_work_c(&mut *work, drm_connector_free_work_fn);
         } else {
-            // INIT_WORK_C() also binds the workqueue executor, which needs a
+            // init_work_c() also binds the workqueue executor, which needs a
             // context that can block; host tests run where it cannot. Set the
             // work fields only, and let the first queue bind the executor.
             (*work).data = 0;
-            INIT_LIST_HEAD(core::ptr::addr_of_mut!((*work).entry));
+            init_list_head(core::ptr::addr_of_mut!((*work).entry));
             (*work).function = Some(drm_connector_free_work_fn);
         }
 

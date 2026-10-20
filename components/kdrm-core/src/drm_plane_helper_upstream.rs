@@ -8,7 +8,6 @@
 
 // The Linux ports state the invariant of each C-ABI call once in the module
 // header, as the GT ports do; per-block SAFETY prose is not repeated.
-#![allow(non_snake_case)]
 
 use core::mem::{size_of, zeroed};
 
@@ -135,20 +134,30 @@ unsafe fn get_connectors_for_crtc(
 /// - `visible` must be non-null, properly aligned, and point to writable `bool` storage.
 /// - The caller must hold the necessary modeset locks for the CRTC and plane.
 // Keeps the Linux function signature.
-#[allow(clippy::too_many_arguments)]
+struct PlaneUpdatePolicy {
+    rotation: u32,
+    min_scale: i32,
+    max_scale: i32,
+    can_position: bool,
+    can_update_disabled: bool,
+}
+
 unsafe fn drm_plane_helper_check_update(
     plane: *mut DrmPlane,
     crtc: *mut DrmCrtc,
     fb: *mut DrmFramebuffer,
     src: *mut DrmRect,
     dst: *mut DrmRect,
-    rotation: u32,
-    min_scale: i32,
-    max_scale: i32,
-    can_position: bool,
-    can_update_disabled: bool,
+    policy: PlaneUpdatePolicy,
     visible: *mut bool,
 ) -> i32 {
+    let PlaneUpdatePolicy {
+        rotation,
+        min_scale,
+        max_scale,
+        can_position,
+        can_update_disabled,
+    } = policy;
     // SAFETY: Stack-allocated `plane_state` and `crtc_state` are initialized via `zeroed()` and populated
     // with caller-verified `plane`, `crtc`, `fb`, and coordinate fields. `copy_nonoverlapping` safely copies
     // `(*crtc).mode` into `crtc_state.mode` (both are aligned and non-overlapping).
@@ -264,11 +273,13 @@ pub unsafe extern "C" fn drm_plane_helper_update_primary(
             fb,
             &mut src,
             &mut dest,
-            DRM_MODE_ROTATE_0,
-            DRM_PLANE_NO_SCALING,
-            DRM_PLANE_NO_SCALING,
-            false,
-            false,
+            PlaneUpdatePolicy {
+                rotation: DRM_MODE_ROTATE_0,
+                min_scale: DRM_PLANE_NO_SCALING,
+                max_scale: DRM_PLANE_NO_SCALING,
+                can_position: false,
+                can_update_disabled: false,
+            },
             &mut visible,
         );
         if ret != 0 {

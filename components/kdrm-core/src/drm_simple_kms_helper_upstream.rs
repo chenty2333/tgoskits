@@ -6,8 +6,6 @@
 //! Provides a unified display abstraction bundling a single primary plane,
 //! CRTC, and encoder into an integrated display pipeline.
 
-#![allow(non_snake_case)]
-
 use core::{
     ffi::{c_int, c_void},
     mem::offset_of,

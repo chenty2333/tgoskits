@@ -6,8 +6,6 @@
 //! and connectors) from a primary DRM master to secondary lessee processes,
 //! enabling independent control over separate display outputs.
 
-#![allow(non_snake_case)]
-
 use core::ffi::{c_int, c_void};
 
 #[cfg(not(test))]
@@ -91,8 +89,12 @@ unsafe extern "C" fn adopt_lessee_master(file_priv: *mut DrmFile, ctx: *mut c_vo
     unsafe {
         drm_master_put(core::ptr::addr_of_mut!((*file_priv).master));
         (*file_priv).master = ctx.cast::<DrmMaster>();
-        (*file_priv).is_master = true;
-        (*file_priv).authenticated = true;
+        (*file_priv)
+            .is_master
+            .store(true, core::sync::atomic::Ordering::Relaxed);
+        (*file_priv)
+            .authenticated
+            .store(true, core::sync::atomic::Ordering::Relaxed);
     }
 }
 

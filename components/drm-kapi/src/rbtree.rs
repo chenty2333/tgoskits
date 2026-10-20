@@ -4,15 +4,13 @@
 use crate::types::{RbNode, RbRoot, RbRootCached};
 
 /// Initializer for an empty red-black tree root.
-#[allow(non_upper_case_globals)]
 pub const RB_ROOT: RbRoot = RbRoot {
     node: core::ptr::null_mut(),
 };
 
 /// Check if a red-black tree root is empty.
 #[inline]
-#[allow(non_snake_case)]
-pub fn RB_EMPTY_ROOT(root: &RbRoot) -> bool {
+pub fn rb_empty_root(root: &RbRoot) -> bool {
     root.node.is_null()
 }
 
@@ -76,8 +74,7 @@ impl RbNodePtr for &RbNode {
 /// `node` must convert to a non-null, aligned pointer to an initialized `RbNode`
 /// whose `parent_color` field can be safely read. Concurrent modifications must
 /// be synchronized.
-#[allow(non_snake_case)]
-pub unsafe fn RB_EMPTY_NODE<N: RbNodePointer>(node: N) -> bool {
+pub unsafe fn rb_empty_node<N: RbNodePointer>(node: N) -> bool {
     let ptr = node.into_rb_node_ptr();
     assert!(!ptr.is_null());
     // SAFETY: `ptr` is checked non-null by the assertion above. The caller guarantees
@@ -92,8 +89,7 @@ pub unsafe fn RB_EMPTY_NODE<N: RbNodePointer>(node: N) -> bool {
 /// `node` must convert to a non-null, aligned pointer to an initialized `RbNode`
 /// with exclusive mutable access. Overwriting `parent_color` must not race with
 /// any reader or writer.
-#[allow(non_snake_case)]
-pub unsafe fn RB_CLEAR_NODE<N: RbNodePointer>(node: N) {
+pub unsafe fn rb_clear_node<N: RbNodePointer>(node: N) {
     let ptr = node.into_rb_node_ptr();
     assert!(!ptr.is_null());
     // SAFETY: `ptr` is verified non-null by the assertion above. The caller guarantees
@@ -1157,7 +1153,7 @@ mod tests {
             new_int_node(15),
         ];
         let mut root = RB_ROOT;
-        assert!(RB_EMPTY_ROOT(&root));
+        assert!(rb_empty_root(&root));
 
         for entry in &mut entries {
             // SAFETY: `entry` is a live, stack-allocated `IntNode` with a unique address.
@@ -1167,7 +1163,7 @@ mod tests {
             }
         }
 
-        assert!(!RB_EMPTY_ROOT(&root));
+        assert!(!rb_empty_root(&root));
         // SAFETY: `root.node` is the root of the stack-allocated test tree. Inspecting its
         // color and recursively checking tree invariants reads live, initialized memory.
         unsafe {
@@ -1242,7 +1238,7 @@ mod tests {
                     assert!(is_black_node(root.node));
                     verify_rb_invariants(root.node);
                 } else {
-                    assert!(RB_EMPTY_ROOT(&root));
+                    assert!(rb_empty_root(&root));
                 }
             }
         }
@@ -1281,19 +1277,19 @@ mod tests {
 
         rb_erase_cached(&mut second.node, &mut root);
         assert!(root.leftmost.is_null());
-        assert!(RB_EMPTY_ROOT(&root.root));
+        assert!(rb_empty_root(&root.root));
     }
 
     #[test]
     fn node_clear_and_empty_flags() {
         let mut node = new_int_node(42).node;
-        // SAFETY: `node` is a live stack-allocated `RbNode`. `RB_CLEAR_NODE` writes `&node as usize`
-        // into `parent_color`, and `RB_EMPTY_NODE` reads it back to verify the empty marker.
+        // SAFETY: `node` is a live stack-allocated `RbNode`. `rb_clear_node` writes `&node as usize`
+        // into `parent_color`, and `rb_empty_node` reads it back to verify the empty marker.
         unsafe {
-            RB_CLEAR_NODE(&mut node);
-            assert!(RB_EMPTY_NODE(&node));
-            assert!(RB_EMPTY_NODE(&mut node));
-            assert!(RB_EMPTY_NODE(&mut node as *mut RbNode));
+            rb_clear_node(&mut node);
+            assert!(rb_empty_node(&node));
+            assert!(rb_empty_node(&mut node));
+            assert!(rb_empty_node(&mut node as *mut RbNode));
         }
     }
 

@@ -2,15 +2,13 @@
 // Copyright 2026 TheKernel contributors. See ../LICENSE-MIT.
 //! Port of Linux `drivers/gpu/drm/drm_atomic_uapi.c`.
 
-#![allow(non_snake_case)]
-
 use core::{
     ffi::{c_int, c_void},
     mem::size_of,
 };
 
 use drm_kapi::{
-    config::{EDEADLK, EFAULT, EINVAL, ENOENT, ENOMEM, EOPNOTSUPP, GFP_KERNEL, IS_ERR, PTR_ERR},
+    config::{EDEADLK, EFAULT, EINVAL, ENOENT, ENOMEM, EOPNOTSUPP, GFP_KERNEL, is_err, ptr_err},
     memory::{kfree, kzalloc},
     sync_file::{SyncFile, sync_file_create, sync_file_get_fence},
     types::DmaFence,
@@ -311,8 +309,8 @@ pub unsafe extern "C" fn drm_atomic_set_mode_for_crtc(
                 size_of::<DrmModeModeinfo>(),
                 umode.as_ptr() as *const c_void,
             );
-            if IS_ERR(blob) {
-                return PTR_ERR(blob);
+            if is_err(blob) {
+                return ptr_err(blob);
             }
 
             core::ptr::copy_nonoverlapping(mode, core::ptr::addr_of_mut!((*state).mode), 1);
@@ -408,8 +406,8 @@ pub unsafe extern "C" fn drm_atomic_set_crtc_for_plane(
                 (*plane_state).state,
                 (*plane_state).crtc,
             );
-            if IS_ERR(crtc_state) {
-                return PTR_ERR(crtc_state);
+            if is_err(crtc_state) {
+                return ptr_err(crtc_state);
             }
             (*crtc_state).plane_mask &= !drm_plane_mask(plane);
         }
@@ -419,8 +417,8 @@ pub unsafe extern "C" fn drm_atomic_set_crtc_for_plane(
         if !crtc.is_null() {
             let crtc_state =
                 crate::drm_atomic_upstream::drm_atomic_get_crtc_state((*plane_state).state, crtc);
-            if IS_ERR(crtc_state) {
-                return PTR_ERR(crtc_state);
+            if is_err(crtc_state) {
+                return ptr_err(crtc_state);
             }
             (*crtc_state).plane_mask |= drm_plane_mask(plane);
         }
@@ -498,8 +496,8 @@ pub unsafe extern "C" fn drm_atomic_set_crtc_for_connector(
         if !crtc.is_null() {
             let crtc_state =
                 crate::drm_atomic_upstream::drm_atomic_get_crtc_state((*conn_state).state, crtc);
-            if IS_ERR(crtc_state) {
-                let ret = PTR_ERR(crtc_state);
+            if is_err(crtc_state) {
+                let ret = ptr_err(crtc_state);
                 return ret;
             }
 
@@ -1458,10 +1456,10 @@ pub unsafe extern "C" fn drm_atomic_connector_commit_dpms(
 
     // SAFETY: `state` and `crtc` are valid for atomic CRTC state lookup.
     let crtc_state = unsafe { crate::drm_atomic_upstream::drm_atomic_get_crtc_state(state, crtc) };
-    if IS_ERR(crtc_state) {
+    if is_err(crtc_state) {
         // SAFETY: `connector` points to caller-supplied mutable atomic state; `dpms` write is aligned and within bounds.
         unsafe { (*connector).dpms = old_mode };
-        return PTR_ERR(crtc_state);
+        return ptr_err(crtc_state);
     }
 
     let mut active = false;
@@ -1547,8 +1545,8 @@ pub unsafe extern "C" fn drm_atomic_set_property(
             let connector_state = unsafe {
                 crate::drm_atomic_upstream::drm_atomic_get_connector_state(state, connector)
             };
-            if IS_ERR(connector_state) {
-                ret = PTR_ERR(connector_state);
+            if is_err(connector_state) {
+                ret = ptr_err(connector_state);
             } else if async_flip {
                 // SAFETY: `connector` and `connector_state` are valid; `old_val` is an aligned out-reference.
                 let get_ret = unsafe {
@@ -1580,8 +1578,8 @@ pub unsafe extern "C" fn drm_atomic_set_property(
             let crtc_state =
                 // SAFETY: `state` and `crtc` are valid for atomic CRTC state lookup.
                 unsafe { crate::drm_atomic_upstream::drm_atomic_get_crtc_state(state, crtc) };
-            if IS_ERR(crtc_state) {
-                ret = PTR_ERR(crtc_state);
+            if is_err(crtc_state) {
+                ret = ptr_err(crtc_state);
             } else if async_flip {
                 let get_ret =
                     // SAFETY: `crtc` and `crtc_state` are valid; `old_val` is an aligned out-reference.
@@ -1599,8 +1597,8 @@ pub unsafe extern "C" fn drm_atomic_set_property(
             let plane_state =
                 // SAFETY: `state` and `plane` are valid for atomic plane state lookup.
                 unsafe { crate::drm_atomic_upstream::drm_atomic_get_plane_state(state, plane) };
-            if IS_ERR(plane_state) {
-                ret = PTR_ERR(plane_state);
+            if is_err(plane_state) {
+                ret = ptr_err(plane_state);
             } else if async_flip {
                 // SAFETY: `plane` and `plane_state` are valid; `old_val` is an aligned out-reference.
                 let get_ret = unsafe {
@@ -1910,7 +1908,11 @@ pub unsafe extern "C" fn drm_mode_atomic_ioctl(
     }
 
     // SAFETY: `file_priv` was verified non-null above and points to live `DrmFile`.
-    if unsafe { !(*file_priv).atomic } {
+    if unsafe {
+        !(*file_priv)
+            .atomic
+            .load(core::sync::atomic::Ordering::Relaxed)
+    } {
         return -EINVAL;
     }
 
@@ -1957,7 +1959,11 @@ pub unsafe extern "C" fn drm_mode_atomic_ioctl(
         );
         (*state).acquire_ctx = ctx.as_mut_ptr();
         (*state).set_allow_modeset(((*arg).flags & DRM_MODE_ATOMIC_ALLOW_MODESET) != 0);
-        (*state).set_plane_color_pipeline((*file_priv).plane_color_pipeline);
+        (*state).set_plane_color_pipeline(
+            (*file_priv)
+                .plane_color_pipeline
+                .load(core::sync::atomic::Ordering::Relaxed),
+        );
     }
 
     // SAFETY: `arg` points to caller-supplied `DrmModeAtomic`.

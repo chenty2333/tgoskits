@@ -82,12 +82,10 @@ pub unsafe fn llist_del_all(head: *mut LlistHead) -> *mut crate::types::LlistNod
     unsafe { AtomicPtr::from_ptr(core::ptr::addr_of_mut!((*head).first)) }
         .swap(core::ptr::null_mut(), Ordering::Acquire)
 }
-
-#[allow(non_snake_case)]
 /// # Safety
 /// `head` must be non-null, properly aligned to `ListHead`, and point to valid
 /// writable memory. The caller must have exclusive access to `head`.
-pub unsafe fn INIT_LIST_HEAD(head: *mut ListHead) {
+pub unsafe fn init_list_head(head: *mut ListHead) {
     // SAFETY: `head` is non-null, aligned, and exclusively accessed; initializes
     // `next` and `prev` to point to `head` itself, forming an empty circular list.
     unsafe {
@@ -234,7 +232,7 @@ pub unsafe fn list_del_init(entry: *mut ListHead) {
     // `__list_del` and reinitializes `entry` as a self-referencing empty list.
     unsafe {
         __list_del((*entry).prev, (*entry).next);
-        INIT_LIST_HEAD(entry);
+        init_list_head(entry);
     }
 }
 
@@ -287,7 +285,7 @@ pub unsafe fn list_splice_init(list: *mut ListHead, head: *mut ListHead) {
         (*head).next = first;
         (*last).next = at;
         (*at).prev = last;
-        INIT_LIST_HEAD(list);
+        init_list_head(list);
     }
 }
 
@@ -496,9 +494,9 @@ pub fn entry_from_link<T>(link: *mut ListHead, offset: usize) -> *mut T {
 }
 
 #[macro_export]
-macro_rules! INIT_LIST_HEAD {
-    // SAFETY: `$head` is cast to `*mut ListHead` and passed to the unsafe `INIT_LIST_HEAD`; the caller must supply writable, aligned storage for a `ListHead`.
-    ($head:expr) => {{ unsafe { $crate::list::INIT_LIST_HEAD($head as *mut $crate::types::ListHead) } }};
+macro_rules! init_list_head {
+    // SAFETY: `$head` is cast to `*mut ListHead` and passed to the unsafe `init_list_head`; the caller must supply writable, aligned storage for a `ListHead`.
+    ($head:expr) => {{ unsafe { $crate::list::init_list_head($head as *mut $crate::types::ListHead) } }};
 }
 
 #[macro_export]
@@ -751,7 +749,7 @@ mod tests {
             prev: core::ptr::null_mut(),
         };
         // SAFETY: head is a local stack ListHead variable valid for exclusive mutation.
-        unsafe { INIT_LIST_HEAD(&mut head) };
+        unsafe { init_list_head(&mut head) };
         let mut entries = [
             Entry {
                 link: ListHead {
@@ -811,7 +809,7 @@ mod tests {
             prev: core::ptr::null_mut(),
         };
         // SAFETY: head is a local stack ListHead variable valid for exclusive mutation.
-        unsafe { INIT_LIST_HEAD(&mut head) };
+        unsafe { init_list_head(&mut head) };
         let mut entries = [
             OffsetEntry {
                 prefix: [0; 3],
@@ -894,7 +892,7 @@ mod tests {
             prev: core::ptr::null_mut(),
         };
         // SAFETY: head is a local stack ListHead variable valid for exclusive mutation.
-        unsafe { INIT_LIST_HEAD(&mut head) };
+        unsafe { init_list_head(&mut head) };
         let mut visits = 0;
 
         let mut pos: *mut OffsetEntry = core::ptr::null_mut();

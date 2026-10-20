@@ -7,8 +7,6 @@
 // conversion specifiers here. This deliberately does not turn diagnostics into
 // no-ops.
 
-#![allow(non_camel_case_types, non_snake_case)]
-
 use alloc::{
     ffi::CString,
     format,
@@ -38,8 +36,6 @@ static DRM_DEBUG_MASK: AtomicU32 = AtomicU32::new(0);
 pub fn drm_debug_set(mask: u32) {
     DRM_DEBUG_MASK.store(mask, Ordering::Release);
 }
-
-#[allow(non_snake_case)]
 pub fn drm_debug_enabled(category: u32) -> bool {
     DRM_DEBUG_MASK.load(Ordering::Acquire) & category != 0
 }

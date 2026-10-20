@@ -4,8 +4,6 @@
 // Linux assertion semantics for the source-order DRM translations. In
 // particular, GEM_BUG_ON is not erased: a violated source invariant panics.
 
-#![allow(non_snake_case)]
-
 /// Linux lockdep assertions compile to no-ops in the recorded reference kernel
 /// configuration (`CONFIG_LOCKDEP=n`). If this compatibility layer is ever
 /// built against a configuration with lockdep enabled, failing loudly is safer
@@ -46,13 +44,12 @@ pub fn warn_on(condition: bool) -> bool {
     condition
 }
 
-/// `MISSING_CASE()` reports unsupported switch values without changing
+/// `missing_case()` reports unsupported switch values without changing
 /// control flow, as the Linux helper does.
-#[allow(non_snake_case)]
-pub fn MISSING_CASE<T: core::fmt::Display>(value: T) {
+pub fn missing_case<T: core::fmt::Display>(value: T) {
     let location = core::panic::Location::caller();
     log::warn!(
-        "drm MISSING_CASE({}) at {}:{}",
+        "drm missing_case({}) at {}:{}",
         value,
         location.file(),
         location.line()
@@ -147,13 +144,8 @@ macro_rules! drm_WARN_ON {
 }
 
 #[macro_export]
-macro_rules! MISSING_CASE {
-    ($value:expr $(,)?) => {{ $crate::assert::MISSING_CASE($value) }};
-}
-
-#[macro_export]
 macro_rules! missing_case {
-    ($value:expr $(,)?) => {{ MISSING_CASE!($value) }};
+    ($value:expr $(,)?) => {{ $crate::assert::missing_case($value) }};
 }
 
 #[macro_export]

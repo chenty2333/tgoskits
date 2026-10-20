@@ -7,8 +7,6 @@
 //! device it leaves them dirty and reports the Linux no-swap result instead of
 //! pretending that data was written.
 
-#![allow(non_camel_case_types, non_snake_case)]
-
 use alloc::{
     alloc::{alloc, alloc_zeroed, dealloc},
     collections::BTreeMap,
@@ -1290,7 +1288,7 @@ pub unsafe fn set_folio_mapped(folio: *mut Folio, mapped: bool) {
 }
 
 fn err_ptr<T>(error: c_int) -> *mut T {
-    crate::config::ERR_PTR(error)
+    crate::config::err_ptr(error)
 }
 
 fn copy_file_name(name: *const c_char) -> [u8; 32] {
@@ -1399,7 +1397,7 @@ unsafe fn setup_file(name: *const c_char, size: u64) -> *mut File {
 /// # Safety
 /// `name` must point to a readable NUL-terminated string for the duration of
 /// the call. A successful result owns one file reference and must eventually
-/// be released with [`fput_file`]; an `ERR_PTR` result owns no reference.
+/// be released with [`fput_file`]; an `err_ptr` result owns no reference.
 pub unsafe fn shmem_file_setup(name: *const c_char, size: u64, _flags: c_ulong) -> *mut File {
     // SAFETY: Forwarding `name` and `size` to `setup_file` under caller's contract.
     unsafe { setup_file(name, size) }
@@ -1411,7 +1409,7 @@ pub unsafe fn shmem_file_setup(name: *const c_char, size: u64, _flags: c_ulong) 
 /// # Safety
 /// `name` must point to a readable NUL-terminated string for the duration of
 /// the call. A successful result owns one file reference and must eventually
-/// be released with [`fput_file`]; an `ERR_PTR` result owns no reference.
+/// be released with [`fput_file`]; an `err_ptr` result owns no reference.
 pub unsafe fn shmem_file_setup_with_mnt(
     _mnt: *mut VfsMount,
     name: *const c_char,
@@ -1425,11 +1423,11 @@ pub unsafe fn shmem_file_setup_with_mnt(
 /// Acquire a reference to a LinuxKPI shmem file for a VMA or other owner.
 ///
 /// # Safety
-/// `file` must be null, an `ERR_PTR`, or a live LinuxKPI shmem file for which
+/// `file` must be null, an `err_ptr`, or a live LinuxKPI shmem file for which
 /// the caller already owns a reference. A successful file pointer result owns
 /// one additional reference that must later be released with [`fput_file`].
 pub unsafe fn get_file_file(file: *mut File) -> *mut File {
-    if file.is_null() || crate::config::IS_ERR(file) {
+    if file.is_null() || crate::config::is_err(file) {
         return file;
     }
     // SAFETY: Caller guarantees `file` is live and holds a reference; incrementing atomic refcount.
@@ -1444,15 +1442,15 @@ pub unsafe fn get_file_file(file: *mut File) -> *mut File {
 /// Drop a shmem file reference and release its cache on the final put.
 ///
 /// # Safety
-/// `file` must be null, an `ERR_PTR`, or a live LinuxKPI shmem file for which
+/// `file` must be null, an `err_ptr`, or a live LinuxKPI shmem file for which
 /// the caller owns exactly one reference. Its release callback, if any, must
 /// be valid to invoke during the final put and must not free the file or its
 /// mapping independently.
 pub unsafe fn fput_file(file: *mut File) {
-    if file.is_null() || crate::config::IS_ERR(file) {
+    if file.is_null() || crate::config::is_err(file) {
         return;
     }
-    // SAFETY: `file` is non-null and not ERR_PTR; decrementing atomic refcount with AcqRel.
+    // SAFETY: `file` is non-null and not err_ptr; decrementing atomic refcount with AcqRel.
     let old = unsafe { (*file).refs.fetch_sub(1, Ordering::AcqRel) };
     assert!(old != 0, "file reference underflow");
     if old != 1 {
@@ -1494,7 +1492,7 @@ pub unsafe fn fget_file(file: *mut File) -> *mut File {
 /// opaque file-pointer type.
 ///
 /// # Safety
-/// `file` must be null, an `ERR_PTR`, or a LinuxKPI shmem file pointer for
+/// `file` must be null, an `err_ptr`, or a LinuxKPI shmem file pointer for
 /// which the caller owns exactly one reference.
 pub unsafe fn fput(file: *mut c_void) {
     // SAFETY: Forwarding `file` pointer to `fput_file` under caller's contract.
@@ -1696,12 +1694,12 @@ pub unsafe fn iov_iter_ubuf(iter: &mut IovIter, direction: u32, buffer: *mut c_v
 /// - If `count > 0`, `data` must point to a readable buffer of at least `count` bytes
 ///   that does not overlap with any destination page.
 unsafe fn write_at(file: *mut File, mut position: u64, data: *const u8, count: usize) -> isize {
-    if file.is_null() || crate::config::IS_ERR(file) {
+    if file.is_null() || crate::config::is_err(file) {
         return -EINVAL as isize;
     }
-    // SAFETY: `file` is verified non-null and not ERR_PTR.
+    // SAFETY: `file` is verified non-null and not err_ptr.
     let mapping = unsafe { (*file).f_mapping };
-    // SAFETY: `file` is verified non-null and not ERR_PTR.
+    // SAFETY: `file` is verified non-null and not err_ptr.
     let inode = unsafe { (*file).f_inode };
     let Some(end) = position.checked_add(count as u64) else {
         return -EFBIG as isize;
@@ -1719,11 +1717,11 @@ unsafe fn write_at(file: *mut File, mut position: u64, data: *const u8, count: u
         let this = (PAGE_SIZE - offset).min(count - written);
         // SAFETY: Reading/allocating folio at `index` from valid `mapping`.
         let folio = unsafe { shmem_read_folio_gfp(mapping, index, mapping_gfp_mask(mapping)) };
-        if crate::config::IS_ERR(folio) {
+        if crate::config::is_err(folio) {
             return if written != 0 {
                 written as isize
             } else {
-                crate::config::PTR_ERR(folio) as isize
+                crate::config::ptr_err(folio) as isize
             };
         }
         let page = folio.cast::<Page>();

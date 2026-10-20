@@ -2,8 +2,6 @@
 // Copyright 2026 TheKernel contributors. See ../LICENSE-MIT.
 //! Linux vmap/vunmap policy over the host's kernel virtual-memory service.
 
-#![allow(non_camel_case_types, non_snake_case)]
-
 use alloc::collections::BTreeMap;
 use core::{
     ffi::{c_int, c_ulong, c_void},
@@ -147,7 +145,7 @@ pub unsafe extern "C" fn vmap(
     for index in 0..count as usize {
         // SAFETY: `index < count` and caller guarantees `pages` points to `count` live `Page` pointers.
         let page = unsafe { pages.add(index).read() };
-        if page.is_null() || crate::config::IS_ERR(page) {
+        if page.is_null() || crate::config::is_err(page) {
             // SAFETY: `physical_pages` was allocated via `kvmalloc_objs` and is freed on early exit.
             unsafe { kfree(physical_pages) };
             return ptr::null_mut();

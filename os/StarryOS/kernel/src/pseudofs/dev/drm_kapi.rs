@@ -4,6 +4,9 @@
 //! The wrapper owns exactly the shmem::File reference transferred by fd_install;
 //! fget returns a separate LinuxKPI reference.
 
+#[cfg(all(test, axtest))]
+mod tests;
+
 use alloc::{
     borrow::Cow,
     boxed::Box,
@@ -22,7 +25,7 @@ use axfs_ng_vfs::DeviceId;
 use axpoll::{IoEvents, Pollable};
 use axpoll_set::PollSet;
 use drm_kapi::{
-    config::{EINVAL, EIO, ENOMEM, ERR_PTR, IS_ERR},
+    config::{EINVAL, EIO, ENOMEM, err_ptr, is_err},
     kernel_services::{
         EventfdOps, FileOps, TaskOps, install_eventfd_ops, install_file_ops, install_task_ops,
     },
@@ -244,11 +247,11 @@ unsafe extern "C" fn anon_inode_getfile(
     flags: c_int,
 ) -> *mut LinuxKpiFile {
     if name.is_null() || fops.is_null() {
-        return ERR_PTR(-EINVAL);
+        return err_ptr(-EINVAL);
     }
     // SAFETY: `name` is verified non-null and valid per caller contract. Allocates a shmem anon file.
     let raw = unsafe { shmem::shmem_file_setup(name, 0, 0) };
-    if raw.is_null() || IS_ERR(raw) {
+    if raw.is_null() || is_err(raw) {
         return raw;
     }
     // SAFETY: `raw` is non-null and verified not an error pointer; initializes its file operations,
@@ -265,7 +268,7 @@ unsafe extern "C" fn anon_inode_getfile(
 /// `fd` must be a valid reserved descriptor from `get_unused_fd_flags`.
 /// `raw` must be a live, referenced `LinuxKpiFile`.
 unsafe extern "C" fn fd_install(fd: c_int, raw: *mut LinuxKpiFile) {
-    if raw.is_null() || IS_ERR(raw) {
+    if raw.is_null() || is_err(raw) {
         panic!("DRM fd_install received a non-file pointer");
     }
     let pending = FD_RESERVATIONS
@@ -307,10 +310,10 @@ unsafe extern "C" fn fget(fd: c_int) -> *mut LinuxKpiFile {
 /// `fd` must be a valid descriptor in the current task.
 unsafe extern "C" fn eventfd_ctx_fdget(fd: c_int) -> *mut c_void {
     let Ok(file) = get_file_like(fd) else {
-        return ERR_PTR(-crate::Errno::EBADF.into_raw());
+        return err_ptr(-crate::Errno::EBADF.into_raw());
     };
     let Ok(eventfd) = file.downcast_arc::<crate::file::event::EventFd>() else {
-        return ERR_PTR(-crate::Errno::EINVAL.into_raw());
+        return err_ptr(-crate::Errno::EINVAL.into_raw());
     };
     Arc::into_raw(eventfd).cast_mut().cast()
 }
@@ -535,10 +538,14 @@ impl FileLike for KapiFile {
             let errno = error.saturating_neg();
             StarryError::from(crate::Errno::new(errno))
         })?;
-        Ok(DeviceMmap::PhysicalResolved(
-            lease.physical(),
-            Some(Arc::new(lease)),
-        ))
+        let range = lease.physical();
+        let cached = lease.cached();
+        let retainer = Some(Arc::new(lease) as Arc<dyn core::any::Any + Send + Sync>);
+        Ok(if cached {
+            DeviceMmap::PhysicalCachedResolved(range, retainer)
+        } else {
+            DeviceMmap::PhysicalResolved(range, retainer)
+        })
     }
 
     fn open_flags(&self) -> u32 {
@@ -631,7 +638,8 @@ impl Pollable for KapiFile {
 }
 
 /// # Safety
-/// `filp` must point to a live LinuxKPI `File` and `head` must point to an initialized `WaitQueueHead`.
+/// `filp` is a live file identity token used only as a lookup key, never
+/// dereferenced; `head` must point to an initialized `WaitQueueHead`.
 unsafe extern "C" fn register_poll_wait(
     filp: *mut drm_kapi::types::File,
     head: *mut WaitQueueHead,
@@ -658,7 +666,7 @@ unsafe extern "C" fn register_poll_wait(
     entry.func = Some(wake_poll_waiters);
     // SAFETY: `entry` is a live, uniquely-owned zeroed waitqueue node whose
     // list linkage has not yet been published.
-    unsafe { drm_kapi::list::INIT_LIST_HEAD(ptr::addr_of_mut!(entry.entry)) };
+    unsafe { drm_kapi::list::init_list_head(ptr::addr_of_mut!(entry.entry)) };
     // SAFETY: `head` is non-null and valid per caller contract; `entry` is pinned by Box.
     unsafe { add_wait_queue(&mut *head, &mut entry) };
     if entries.try_reserve(1).is_err() {
@@ -678,7 +686,7 @@ unsafe extern "C" fn wake_poll_waiters(
     entry: *mut WaitQueueEntry,
     _mode: u32,
     _sync: c_int,
-    _key: *mut c_void,
+    key: *mut c_void,
 ) -> c_int {
     if entry.is_null() {
         return 0;
@@ -690,11 +698,12 @@ unsafe extern "C" fn wake_poll_waiters(
         // ax-drm sends RDIF completion and synthetic-vblank notifications
         // from task/deferred context. A future hardware IRQ path must defer
         // before entering the common DRM event-send path.
-        // DRM's event wait queue signals that the read side may be ready.
+        // Preserve keyed device-terminal notifications as well as read events.
         // SAFETY: The embedded PollSet stays pinned until this wait entry is
         // detached, and ax-drm sends completion/vblank events from
         // task/deferred context.
-        unsafe { (&*poll).wake_all(IoEvents::IN | IoEvents::RDNORM) };
+        let events = if key.is_null() { IoEvents::IN | IoEvents::RDNORM } else { super::card0::linux_poll_events(key as usize as u32) };
+        unsafe { (&*poll).wake_all(events) };
     }
     1
 }

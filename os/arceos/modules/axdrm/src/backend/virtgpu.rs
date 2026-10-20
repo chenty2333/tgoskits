@@ -68,13 +68,16 @@ struct FilePrivate {
 struct FileState {
     context: Option<ContextHandle>,
     context_init: u32,
+    num_rings: u32,
     creating_context: bool,
     attached: *mut AttachedResource,
 }
 
 #[repr(C)]
 struct AttachedResource {
-    handle: BufferHandle,
+    handle: Option<BufferHandle>,
+    handles: usize,
+    attaching: bool,
     object: *mut DrmGemObject,
     next: *mut AttachedResource,
 }
@@ -144,6 +147,7 @@ pub(crate) unsafe extern "C" fn open(_dev: *mut DrmDevice, file: *mut DrmFile) -
                 state: spin::Mutex::new(FileState {
                     context: None,
                     context_init: 0,
+                    num_rings: 1,
                     creating_context: false,
                     attached: ptr::null_mut(),
                 }),
@@ -206,21 +210,196 @@ pub(crate) unsafe extern "C" fn postclose(_dev: *mut DrmDevice, file: *mut DrmFi
     }
 }
 
-/// GEM open/close hooks are intentionally empty: resource attachment is lazy
-/// and tracked once per file by `attach_resource`; destroying the file context
-/// releases every attachment atomically through RDIF.
+/// Register each handle before it becomes visible in the core's IDR. The
+/// file-local count is independent of global handles, PRIME and VMA owners.
 ///
 /// # Safety
-///
-/// The caller must pass valid pointers or null pointers as allowed by DRM GEM callbacks.
-pub(crate) unsafe extern "C" fn gem_open(_obj: *mut DrmGemObject, _file: *mut DrmFile) -> i32 {
+/// The core retains both the object and the open file throughout this hook.
+pub(crate) unsafe extern "C" fn gem_open(obj: *mut DrmGemObject, file: *mut DrmFile) -> i32 {
+    if obj.is_null() || file.is_null() {
+        return NEG_EINVAL;
+    }
+    // SAFETY: The caller retains the live file, initialized by `open`.
+    let Ok(private) = file_private(unsafe { &*file }) else {
+        return NEG_EINVAL;
+    };
+    let node = kmalloc(size_of::<AttachedResource>(), GFP_KERNEL).cast::<AttachedResource>();
+    if node.is_null() {
+        return NEG_ENOMEM;
+    }
+    let mut state = private.state.lock();
+    // SAFETY: The state lock protects the list and every node until removal.
+    unsafe {
+        let found = find_attachment(&state, obj);
+        if !found.is_null() {
+            let Some(count) = (*found).handles.checked_add(1) else {
+                drop(state);
+                kfree(node);
+                return NEG_ENOMEM;
+            };
+            (*found).handles = count;
+            drop(state);
+            kfree(node);
+            return 0;
+        }
+        drm_gem_object_get(obj);
+        node.write(AttachedResource {
+            handle: None,
+            handles: 1,
+            attaching: false,
+            object: obj,
+            next: state.attached,
+        });
+        state.attached = node;
+    }
     0
 }
 
 /// # Safety
+/// The state lock is held; `object` is compared by identity, not dereferenced.
+unsafe fn find_attachment(state: &FileState, object: *mut DrmGemObject) -> *mut AttachedResource {
+    let mut node = state.attached;
+    while !node.is_null() {
+        // SAFETY: All nodes remain allocated while the state lock is held.
+        unsafe {
+            if (*node).object == object {
+                return node;
+            }
+            node = (*node).next;
+        }
+    }
+    ptr::null_mut()
+}
+
+/// # Safety
+/// The state lock is held and `node` is a linked member with no handles or
+/// in-flight attachment. The caller consumes the removed allocation.
+unsafe fn unlink_attachment(state: &mut FileState, node: *mut AttachedResource) {
+    let mut link = ptr::addr_of_mut!(state.attached);
+    // SAFETY: Traversal and mutation are serialized by the state lock.
+    unsafe {
+        while !(*link).is_null() {
+            if *link == node {
+                *link = (*node).next;
+                return;
+            }
+            link = ptr::addr_of_mut!((**link).next);
+        }
+    }
+}
+
+/// Consume one file-local handle and release an unattached last keepalive.
+/// Returns true only when device serialization is required for a host attachment.
 ///
-/// The caller must pass valid pointers or null pointers as allowed by DRM GEM callbacks.
-pub(crate) unsafe extern "C" fn gem_close(_obj: *mut DrmGemObject, _file: *mut DrmFile) {}
+/// # Safety
+/// `private` belongs to the live file and `obj` is retained by the DRM core.
+unsafe fn close_handle(private: &FilePrivate, obj: *mut DrmGemObject) -> bool {
+    let mut state = private.state.lock();
+    // SAFETY: The state lock protects traversal and every node field.
+    unsafe {
+        let node = find_attachment(&state, obj);
+        if node.is_null() || (*node).handles == 0 {
+            return false;
+        }
+        (*node).handles -= 1;
+        if (*node).handles != 0 {
+            return false;
+        }
+        if (*node).handle.is_some() || (*node).attaching {
+            return true;
+        }
+        unlink_attachment(&mut state, node);
+        drop(state);
+        // Final GEM release can reenter the device owner; never hold the
+        // short file-state lock while dropping this detached reference.
+        drm_gem_object_put((*node).object);
+        kfree(node);
+    }
+    false
+}
+
+/// Last file-local handle close detaches before releasing the attachment's
+/// keepalive. Active submissions, VMAs and other files retain their own refs.
+///
+/// # Safety
+/// The core retains the object through this hook, and the file is still open.
+pub(crate) unsafe extern "C" fn gem_close(obj: *mut DrmGemObject, file: *mut DrmFile) {
+    if obj.is_null() || file.is_null() {
+        return;
+    }
+    // SAFETY: The caller retains the initialized file throughout this callback.
+    let Ok(private) = file_private(unsafe { &*file }) else {
+        return;
+    };
+    // SAFETY: Both the file state and object remain live through this hook.
+    if !unsafe { close_handle(private, obj) } {
+        return;
+    }
+    let retired = {
+        // Use the same device lock as attach_resource. Never take a sleeping
+        // GPU lock while holding the short file-state spinlock.
+        ax_gpu::with_gpu_for_cleanup(|gpu| {
+            let (node, resource, context) = {
+                let state = private.state.lock();
+                // SAFETY: The file state protects all node fields.
+                let node = unsafe { find_attachment(&state, obj) };
+                if node.is_null() || unsafe { (*node).handles != 0 } {
+                    return Ok(ptr::null_mut());
+                }
+                // SAFETY: Attach completed before the GPU lock was acquired.
+                // SAFETY: Keep even an unattached node pinned while this
+                // cleanup temporarily releases the state lock.
+                unsafe {
+                    (*node).attaching = true;
+                }
+                (node, unsafe { (*node).handle }, state.context)
+            };
+            if let Some(resource) = resource {
+                let virgl = gpu.virgl().ok_or(GpuError::Unsupported)?;
+                let result =
+                    virgl.detach_resource(context.ok_or(GpuError::InvalidHandle)?, resource);
+                virgl.ctrl_notify();
+                if let Err(error) = result {
+                    let _state = private.state.lock();
+                    // SAFETY: The pending-operation flag pins this node.
+                    unsafe {
+                        (*node).attaching = false;
+                    }
+                    return Err(error);
+                }
+            }
+            let mut state = private.state.lock();
+            // SAFETY: No other last-close owns this node, and attach/detach are
+            // serialized by the GPU lock. A new open can only increase handles.
+            unsafe {
+                (*node).handle = None;
+                (*node).attaching = false;
+                if (*node).handles != 0 {
+                    return Ok(ptr::null_mut());
+                }
+                unlink_attachment(&mut state, node);
+            }
+            Ok(node)
+        })
+        .and_then(|result| result)
+    };
+    match retired {
+        Ok(node) if !node.is_null() => {
+            // SAFETY: The removed node owns one GEM reference. Drop outside
+            // both locks because final GEM release can reenter the GPU owner.
+            unsafe {
+                drm_gem_object_put((*node).object);
+                kfree(node);
+            }
+        }
+        Ok(_) => {}
+        Err(error) => {
+            // A failed detach cannot authorize releasing device-owned storage.
+            // Keep the zero-handle entry until context teardown confirms safety.
+            log::warn!("retaining VirtGPU attachment after detach failure: {error}");
+        }
+    }
+}
 
 fn file_private(file: &DrmFile) -> Result<&FilePrivate, i32> {
     let private = file.driver_priv.cast::<FilePrivate>();
@@ -229,7 +408,7 @@ fn file_private(file: &DrmFile) -> Result<&FilePrivate, i32> {
     unsafe { private.as_ref() }.ok_or(NEG_EINVAL)
 }
 
-fn with_virgl<T>(
+pub(super) fn with_virgl<T>(
     operation: impl FnOnce(&mut dyn VirglOps) -> Result<T, GpuError>,
 ) -> Result<T, i32> {
     ax_gpu::with_gpu(|device| {
@@ -257,9 +436,54 @@ fn context(file: *mut DrmFile) -> Result<Option<ContextHandle>, i32> {
     Ok(context)
 }
 
+#[derive(Clone, Copy)]
+struct ContextConfig {
+    capset_id: u32,
+    num_rings: u32,
+}
+
+impl Default for ContextConfig {
+    fn default() -> Self {
+        Self {
+            capset_id: 0,
+            num_rings: 1,
+        }
+    }
+}
+
+impl ContextConfig {
+    fn parse(params: &[DrmVirtgpuContextSetParam]) -> Result<Self, i32> {
+        let mut config = Self::default();
+        let mut poll_mask = 0u64;
+        let mut seen = 0u32;
+        for param in params {
+            if !(1..=3).contains(&param.param) || seen & (1 << param.param) != 0 {
+                return Err(NEG_EINVAL);
+            }
+            seen |= 1 << param.param;
+            match param.param {
+                VIRTGPU_CONTEXT_PARAM_CAPSET_ID => {
+                    config.capset_id = u32::try_from(param.value).map_err(|_| NEG_EINVAL)?;
+                }
+                VIRTGPU_CONTEXT_PARAM_NUM_RINGS if (1..=64).contains(&param.value) => {
+                    config.num_rings = param.value as u32;
+                }
+                VIRTGPU_CONTEXT_PARAM_POLL_RINGS_MASK => poll_mask = param.value,
+                _ => return Err(NEG_EINVAL),
+            }
+        }
+        if config.capset_id == 0 || (config.num_rings < 64 && poll_mask >> config.num_rings != 0) {
+            return Err(NEG_EINVAL);
+        }
+        // The adapter already tracks completions for every submitted ring;
+        // a poll mask changes notification preference, not fence ownership.
+        Ok(config)
+    }
+}
+
 fn create_context(
     file: *mut DrmFile,
-    context_init: u32,
+    config: ContextConfig,
     explicit: bool,
 ) -> Result<ContextHandle, i32> {
     // SAFETY: If non-null, `file` points to an active `DrmFile` structure provided by DRM core.
@@ -287,7 +511,7 @@ fn create_context(
         NEXT_CONTEXT.fetch_add(1, Ordering::Relaxed)
     );
     let created = with_virgl(|virgl| {
-        let result = virgl.create_context(&name, context_init);
+        let result = virgl.create_context(&name, config.capset_id);
         virgl.ctrl_notify();
         result
     });
@@ -296,7 +520,8 @@ fn create_context(
     match created {
         Ok(context) => {
             state.context = Some(context);
-            state.context_init = context_init;
+            state.context_init = config.capset_id;
+            state.num_rings = config.num_rings;
             Ok(context)
         }
         Err(error) => Err(error),
@@ -307,7 +532,7 @@ fn ensure_context(file: *mut DrmFile) -> Result<ContextHandle, i32> {
     if let Some(context) = context(file)? {
         Ok(context)
     } else {
-        create_context(file, 0, false)
+        create_context(file, ContextConfig::default(), false)
     }
 }
 
@@ -317,86 +542,39 @@ fn attach_resource(
     resource: BufferHandle,
     object: *mut DrmGemObject,
 ) -> Result<(), i32> {
-    // SAFETY: If non-null, `file` points to an active `DrmFile` structure provided by DRM core.
+    // SAFETY: The ioctl owns the live file and an independent GEM lookup ref.
     let file_ref = unsafe { file.as_ref() }.ok_or(NEG_EINVAL)?;
     let private = file_private(file_ref)?;
-    if object.is_null() {
-        return Err(NEG_EINVAL);
-    }
-    let node = kmalloc(size_of::<AttachedResource>(), GFP_KERNEL).cast::<AttachedResource>();
-    if node.is_null() {
-        return Err(NEG_ENOMEM);
-    }
-    // SAFETY: `node` points to freshly allocated heap memory sized and aligned
-    // for `AttachedResource`. `ptr::write` initializes it without dropping uninitialized memory.
-    unsafe {
-        ptr::write(
-            node,
-            AttachedResource {
-                handle: resource,
-                object,
-                next: ptr::null_mut(),
-            },
-        );
-    }
-    let attached = with_virgl(|virgl| {
-        // `with_virgl` serializes resource attachments through ax-gpu's
-        // sleepable device lock. Keep this spinlock only for the short
-        // per-file bookkeeping sections; never hold it across an RDIF call.
-        let already_attached = {
+    with_virgl(|virgl| {
+        let node = {
             let state = private.state.lock();
-            let mut entry = state.attached;
-            let mut found = false;
-            while !entry.is_null() {
-                // SAFETY: The list is owned by `FileState` and protected by `private.state` lock.
-                // Each node in the list points to a valid, live `AttachedResource`.
-                let current = unsafe { &*entry };
-                if current.handle == resource {
-                    found = true;
-                    break;
-                }
-                entry = current.next;
+            // SAFETY: The state lock pins the node during lookup and mutation.
+            let node = unsafe { find_attachment(&state, object) };
+            if node.is_null() || unsafe { (*node).handles == 0 } {
+                return Err(GpuError::InvalidHandle);
             }
-            found
+            // SAFETY: Mark the node before releasing the lock. Last close must
+            // then acquire the GPU lock and cannot free it across this request.
+            unsafe {
+                if (*node).handle.is_some() {
+                    return Ok(());
+                }
+                (*node).attaching = true;
+            }
+            node
         };
-        if already_attached {
-            return Ok(false);
-        }
         let result = virgl.attach_resource(context, resource);
         virgl.ctrl_notify();
-        result?;
-        // The caller's object reference protects it across the host request.
-        // Install the per-context keepalive only after RDIF accepted attach.
-        // SAFETY: `object` was validated non-null and is held live by caller.
-        // `drm_gem_object_get` increments its reference count for the context attachment.
-        unsafe { drm_gem_object_get(object) };
-        let mut state = private.state.lock();
-        // Every caller enters through with_virgl, so the GPU lock and this
-        // file-state lock together serialize duplicate attachment checks.
-        // SAFETY: `node` points to the valid `AttachedResource` allocated above.
-        // Mutating `node->next` and prepending it to `state.attached` is serialized
-        // under the `private.state` lock.
+        let _state = private.state.lock();
+        // SAFETY: The GPU lock and attaching flag keep the node allocated.
         unsafe {
-            (*node).next = state.attached;
-            state.attached = node;
+            (*node).attaching = false;
+            if result.is_ok() {
+                (*node).handle = Some(resource);
+            }
         }
-        Ok(true)
-    });
-    match attached {
-        Ok(true) => Ok(()),
-        Ok(false) => {
-            // SAFETY: `node` was allocated via `kmalloc` above and not linked into
-            // `state.attached`. Freeing it with `kfree` cleans up the allocation.
-            unsafe { kfree(node.cast::<c_void>()) };
-            Ok(())
-        }
-        Err(error) => {
-            // SAFETY: `node` was allocated via `kmalloc` above and not linked into
-            // `state.attached`. Freeing it with `kfree` cleans up the allocation.
-            unsafe { kfree(node.cast::<c_void>()) };
-            Err(error)
-        }
-    }
+        result
+    })
 }
 
 /// Destroy a closing file's context before dropping the GEM references that
@@ -523,7 +701,12 @@ unsafe extern "C" fn ioctl_getparam(
         VIRTGPU_PARAM_3D_FEATURES => u32::from(caps.supports_3d),
         VIRTGPU_PARAM_CAPSET_QUERY_FIX => 1,
         VIRTGPU_PARAM_RESOURCE_BLOB => u32::from(caps.supports_blob),
-        VIRTGPU_PARAM_HOST_VISIBLE | VIRTGPU_PARAM_CROSS_DEVICE => 0,
+        VIRTGPU_PARAM_HOST_VISIBLE => u32::from(
+            caps.supports_blob
+                && caps.supports_context_init
+                && with_virgl(|virgl| Ok(virgl.host_memory_region().is_some())).unwrap_or(false),
+        ),
+        VIRTGPU_PARAM_CROSS_DEVICE => 0,
         VIRTGPU_PARAM_CONTEXT_INIT => u32::from(caps.supports_context_init),
         VIRTGPU_PARAM_SUPPORTED_CAPSET_IDS => {
             if !caps.supports_3d {
@@ -637,21 +820,16 @@ unsafe extern "C" fn ioctl_context_init(
         Ok(params) => params,
         Err(error) => return error,
     };
-    let mut capset_id = 0;
-    for param in params {
-        match param.param {
-            VIRTGPU_CONTEXT_PARAM_CAPSET_ID if param.value <= u32::MAX as u64 => {
-                capset_id = param.value as u32;
-            }
-            VIRTGPU_CONTEXT_PARAM_NUM_RINGS if param.value == 1 => {}
-            VIRTGPU_CONTEXT_PARAM_POLL_RINGS_MASK if param.value == 0 => {}
-            _ => return NEG_EINVAL,
-        }
-    }
-    if capset_id == 0 || supported_capset(capset_id, 1).is_err() {
+    let config = match ContextConfig::parse(&params) {
+        Ok(config) => config,
+        Err(error) => return error,
+    };
+    // Venus advertises capset version 0; max_version is not a requirement to
+    // support version 1. Probe the version-independent capset ID here.
+    if supported_capset(config.capset_id, 0).is_err() {
         return NEG_EINVAL;
     }
-    match create_context(file, capset_id, true) {
+    match create_context(file, config, true) {
         Ok(_) => 0,
         Err(error) => error,
     }
@@ -722,6 +900,7 @@ unsafe extern "C" fn ioctl_resource_create(
         gem::VirglObjectInfo {
             size,
             mapping: Some(mapping),
+            host_mapping: None,
             backing: Some(backing),
             resource,
             resource_3d: Some(desc),
@@ -733,10 +912,7 @@ unsafe extern "C" fn ioctl_resource_create(
         },
     ) {
         Ok(obj) => obj,
-        Err(error) => {
-            gem::release_resource(resource);
-            return error;
-        }
+        Err(error) => return error,
     };
     let mut handle = 0;
     // SAFETY: `file` and `obj` are valid pointers; `&mut handle` is a valid out-pointer.
@@ -814,7 +990,7 @@ unsafe extern "C" fn ioctl_map(_dev: *mut DrmDevice, data: *mut c_void, file: *m
     if obj.is_null() {
         return NEG_ENOENT;
     }
-    if gem::map_backing(obj).is_none() || gem::is_imported(obj) {
+    if gem::cpu_mapping(obj).is_none() || gem::is_imported(obj) {
         // SAFETY: Balance reference acquired via `drm_gem_object_lookup`.
         unsafe { drm_gem_object_put(obj) };
         return NEG_EOPNOTSUPP;
@@ -999,6 +1175,19 @@ unsafe extern "C" fn ioctl_wait(
     result
 }
 
+// Guest-backed blobs consume kernel DMA memory. Host-only blobs consume no
+// guest backing; mappable ones are separately bounded by the negotiated BAR.
+fn blob_gem_size(memory: u32, size: u64) -> Result<usize, i32> {
+    usize::try_from(size)
+        .ok()
+        .and_then(|size| size.checked_add(PAGE_SIZE - 1))
+        .map(|size| size & !(PAGE_SIZE - 1))
+        .filter(|size| {
+            *size != 0 && (memory == VIRTGPU_BLOB_MEM_HOST3D || *size <= MAX_RESOURCE_SIZE)
+        })
+        .ok_or(NEG_EINVAL)
+}
+
 /// # Safety
 ///
 /// If non-null, `dev` must point to an active `DrmDevice`, `data` must point to a valid
@@ -1016,9 +1205,10 @@ unsafe extern "C" fn ioctl_blob_create(
     if !capabilities().is_ok_and(|caps| caps.supports_blob) {
         return NEG_EOPNOTSUPP;
     }
-    if request.size == 0 || request.size > MAX_RESOURCE_SIZE as u64 {
-        return NEG_EINVAL;
-    }
+    let size = match blob_gem_size(request.blob_mem, request.size) {
+        Ok(size) => size,
+        Err(error) => return error,
+    };
     let known_flags = VIRTGPU_BLOB_FLAG_USE_MAPPABLE
         | VIRTGPU_BLOB_FLAG_USE_SHAREABLE
         | VIRTGPU_BLOB_FLAG_USE_CROSS_DEVICE;
@@ -1045,12 +1235,6 @@ unsafe extern "C" fn ioctl_blob_create(
     ) {
         return NEG_EINVAL;
     }
-    if request.blob_mem == VIRTGPU_BLOB_MEM_HOST3D
-        && request.blob_flags & VIRTGPU_BLOB_FLAG_USE_MAPPABLE != 0
-    {
-        // Host-visible BAR mapping is not exposed by this RDIF backend.
-        return NEG_EOPNOTSUPP;
-    }
     let context = if needs_context {
         match ensure_context(file) {
             Ok(context) => Some(context),
@@ -1059,13 +1243,16 @@ unsafe extern "C" fn ioctl_blob_create(
     } else {
         context(file).ok().flatten()
     };
-    let size = (request.size as usize)
-        .checked_add(PAGE_SIZE - 1)
-        .map(|size| size & !(PAGE_SIZE - 1))
-        .unwrap_or(0);
-    if size == 0 || size > MAX_RESOURCE_SIZE {
-        return NEG_EINVAL;
-    }
+    let host_layout = if request.blob_mem == VIRTGPU_BLOB_MEM_HOST3D
+        && request.blob_flags & VIRTGPU_BLOB_FLAG_USE_MAPPABLE != 0
+    {
+        match super::host_blob::Layout::new(request.size) {
+            Ok(layout) => Some(layout),
+            Err(error) => return error,
+        }
+    } else {
+        None
+    };
     let (mapping, backing) = if request.blob_mem == VIRTGPU_BLOB_MEM_GUEST
         || request.blob_mem == VIRTGPU_BLOB_MEM_HOST3D_GUEST
     {
@@ -1085,6 +1272,8 @@ unsafe extern "C" fn ioctl_blob_create(
     let descriptor = BlobDescriptor {
         memory: request.blob_mem,
         flags: request.blob_flags,
+        // The host allocation belongs to Vulkan and may be only 4 KiB.
+        // BAR slot padding must not enlarge the RESOURCE_CREATE_BLOB size.
         size: request.size,
         id: request.blob_id,
     };
@@ -1098,11 +1287,25 @@ unsafe extern "C" fn ioctl_blob_create(
         Ok(value) => value,
         Err(error) => return error,
     };
+    let host_mapping = if request.blob_flags & VIRTGPU_BLOB_FLAG_USE_MAPPABLE != 0 {
+        if let Some(layout) = &host_layout {
+            match layout.map(resource) {
+                Ok(mapping) => Some(mapping),
+                // Mapping failure consumes the newly created device resource.
+                Err(error) => return error,
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let obj = match gem::create_virgl_object(
         dev,
         gem::VirglObjectInfo {
             size,
             mapping,
+            host_mapping,
             backing,
             resource,
             resource_3d: None,
@@ -1114,10 +1317,7 @@ unsafe extern "C" fn ioctl_blob_create(
         },
     ) {
         Ok(obj) => obj,
-        Err(error) => {
-            gem::release_resource(resource);
-            return error;
-        }
+        Err(error) => return error,
     };
     let mut handle = 0;
     // SAFETY: `file` and `obj` are valid; `&mut handle` is a valid out-pointer.
@@ -1185,11 +1385,9 @@ unsafe extern "C" fn ioctl_execbuffer(
     // SAFETY: `data` was validated non-null and points to a kernel `DrmVirtgpuExecbuffer` buffer.
     let mut request = unsafe { *data.cast::<DrmVirtgpuExecbuffer>() };
     if request.flags & !VIRTGPU_EXECBUF_FLAGS != 0
-        || (request.flags & VIRTGPU_EXECBUF_RING_IDX != 0 && request.ring_idx != 0)
-        || request.size == 0
         || request.size as usize > MAX_COMMAND
         || request.num_bo_handles as usize > MAX_HANDLES
-        || request.command == 0
+        || (request.size != 0 && request.command == 0)
         || (request.num_bo_handles != 0 && request.bo_handles == 0)
         || (request.flags & VIRTGPU_EXECBUF_FENCE_FD_IN != 0 && request.fence_fd < 0)
     {
@@ -1209,6 +1407,28 @@ unsafe extern "C" fn ioctl_execbuffer(
         Ok(context) => context,
         Err(error) => return error,
     };
+    let (capset_id, num_rings) = {
+        // SAFETY: The ioctl retains the live file and private allocation.
+        let private = match file_private(unsafe { &*file }) {
+            Ok(private) => private,
+            Err(error) => return error,
+        };
+        let state = private.state.lock();
+        (state.context_init, state.num_rings)
+    };
+    let ring = if request.flags & VIRTGPU_EXECBUF_RING_IDX != 0 {
+        if request.ring_idx >= num_rings {
+            return NEG_EINVAL;
+        }
+        Some(request.ring_idx as u8)
+    } else if capset_id == 4 {
+        Some(0) // Venus can kick commands resident in its shared ring.
+    } else {
+        None
+    };
+    if request.size == 0 && capset_id != 4 {
+        return NEG_EINVAL;
+    }
     if request.flags & VIRTGPU_EXECBUF_FENCE_FD_IN != 0 {
         // SAFETY: `request.fence_fd` is checked >= 0; `drm_syncobj_sync_file_get_fence`
         // returns a referenced fence or null.
@@ -1284,7 +1504,11 @@ unsafe extern "C" fn ioctl_execbuffer(
         return attach_error;
     }
     let completion = match with_virgl(|virgl| {
-        let completion = virgl.submit(context, &command)?;
+        let completion = if let Some(ring) = ring {
+            virgl.submit_ring(context, &command, ring)?
+        } else {
+            virgl.submit(context, &command)?
+        };
         virgl.ctrl_notify();
         Ok(completion)
     }) {
@@ -1512,4 +1736,106 @@ fn export_fence_fd(fence: *mut DmaFence, output: &mut i32) -> i32 {
     unsafe { fd_install(fd, file.cast()) };
     *output = fd;
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_only_blobs_do_not_consume_the_guest_backing_budget() {
+        let large_host_allocation = MAX_RESOURCE_SIZE as u64 + PAGE_SIZE as u64;
+        assert_eq!(
+            blob_gem_size(VIRTGPU_BLOB_MEM_HOST3D, large_host_allocation),
+            Ok(large_host_allocation as usize)
+        );
+        for memory in [VIRTGPU_BLOB_MEM_GUEST, VIRTGPU_BLOB_MEM_HOST3D_GUEST] {
+            assert_eq!(
+                blob_gem_size(memory, large_host_allocation),
+                Err(NEG_EINVAL)
+            );
+            assert_eq!(blob_gem_size(memory, PAGE_SIZE as u64 - 1), Ok(PAGE_SIZE));
+        }
+        assert_eq!(blob_gem_size(VIRTGPU_BLOB_MEM_HOST3D, 0), Err(NEG_EINVAL));
+        assert_eq!(
+            blob_gem_size(VIRTGPU_BLOB_MEM_HOST3D, u64::MAX),
+            Err(NEG_EINVAL)
+        );
+    }
+
+    #[test]
+    fn file_local_handle_counts_release_keepalives_independently() {
+        // SAFETY: These C-shaped records start zeroed; all refcount and
+        // per-file private state is initialized before the hooks use it.
+        unsafe {
+            let mut object: DrmGemObject = core::mem::zeroed();
+            drm_kapi::memory::kref_init(ptr::addr_of_mut!(object.refcount));
+            let mut first: DrmFile = core::mem::zeroed();
+            let mut second: DrmFile = core::mem::zeroed();
+            assert_eq!(open(ptr::null_mut(), &mut first), 0);
+            assert_eq!(open(ptr::null_mut(), &mut second), 0);
+            for _ in 0..32 {
+                assert_eq!(gem_open(&mut object, &mut first), 0);
+                assert_eq!(gem_open(&mut object, &mut first), 0);
+                assert_eq!(gem_open(&mut object, &mut second), 0);
+                assert_eq!(
+                    drm_kapi::memory::refcount_read(&object.refcount.refcount),
+                    3
+                );
+                assert!(!close_handle(file_private(&first).unwrap(), &mut object));
+                assert_eq!(
+                    drm_kapi::memory::refcount_read(&object.refcount.refcount),
+                    3
+                );
+                assert!(!close_handle(file_private(&second).unwrap(), &mut object));
+                assert_eq!(
+                    drm_kapi::memory::refcount_read(&object.refcount.refcount),
+                    2
+                );
+                assert!(!close_handle(file_private(&first).unwrap(), &mut object));
+                assert_eq!(
+                    drm_kapi::memory::refcount_read(&object.refcount.refcount),
+                    1
+                );
+            }
+            // All local keepalives are gone; no context/device was created in
+            // this hosted ownership test. Native detach is exercised by the
+            // repeated-resource QEMU application, not by a fake GPU runtime.
+            for file in [&mut first, &mut second] {
+                let private = file.driver_priv.cast::<FilePrivate>();
+                assert!((*private).state.lock().attached.is_null());
+                ptr::drop_in_place(private);
+                kfree(private);
+                file.driver_priv = ptr::null_mut();
+            }
+        }
+    }
+
+    #[test]
+    fn context_rings_validate_the_declared_ring_namespace() {
+        let mut params = [
+            DrmVirtgpuContextSetParam {
+                param: VIRTGPU_CONTEXT_PARAM_CAPSET_ID,
+                value: 4,
+            },
+            DrmVirtgpuContextSetParam {
+                param: VIRTGPU_CONTEXT_PARAM_NUM_RINGS,
+                value: 64,
+            },
+            DrmVirtgpuContextSetParam {
+                param: VIRTGPU_CONTEXT_PARAM_POLL_RINGS_MASK,
+                value: 1 << 63,
+            },
+        ];
+        let config = ContextConfig::parse(&params).unwrap();
+        assert_eq!((config.capset_id, config.num_rings), (4, 64));
+        params[1].value = 63;
+        assert!(ContextConfig::parse(&params).is_err());
+        params[2].value = 1;
+        assert!(ContextConfig::parse(&params).is_ok());
+        params[1].value = 0;
+        assert!(ContextConfig::parse(&params).is_err());
+        params[1] = params[0];
+        assert!(ContextConfig::parse(&params).is_err());
+    }
 }

@@ -6,15 +6,13 @@
 //! infoframe generation (AVI, SPD, HDR, HDMI-VS), connector mode validation,
 //! and infoframes update/clear routines.
 
-#![allow(non_snake_case)]
-
 use core::{
     cmp::{max, min},
     ffi::{c_char, c_void},
 };
 
 use drm_kapi::{
-    config::{EINVAL, EOPNOTSUPP, IS_ERR, PTR_ERR},
+    config::{EINVAL, EOPNOTSUPP, is_err, ptr_err},
     mutex::{mutex_lock, mutex_unlock},
 };
 
@@ -66,7 +64,7 @@ unsafe extern "C" {
     /// # Safety
     ///
     /// If non-null, `state` and `crtc` must point to valid, initialized `DrmAtomicCommit`
-    /// and `DrmCrtc` structures. The caller must verify the returned pointer with `IS_ERR`
+    /// and `DrmCrtc` structures. The caller must verify the returned pointer with `is_err`
     /// before dereferencing.
     fn drm_atomic_get_crtc_state(
         state: *mut DrmAtomicCommit,
@@ -1018,12 +1016,12 @@ pub unsafe extern "C" fn drm_atomic_helper_connector_hdmi_check(
         let crtc = unsafe { (*new_conn_state).crtc };
         // SAFETY: `state` and `crtc` are valid non-null pointers to atomic state and CRTC.
         let crtc_state = unsafe { drm_atomic_get_crtc_state(state, crtc) };
-        if IS_ERR(crtc_state as *const c_void) {
-            return PTR_ERR(crtc_state as *const c_void);
+        if is_err(crtc_state as *const c_void) {
+            return ptr_err(crtc_state as *const c_void);
         }
 
         // crtc_state->mode_changed = true; (bit 1 in _bitfields_10)
-        // SAFETY: `crtc_state` is checked against `IS_ERR` above, properly aligned, and points to a valid `DrmCrtcState`.
+        // SAFETY: `crtc_state` is checked against `is_err` above, properly aligned, and points to a valid `DrmCrtcState`.
         unsafe { (*crtc_state)._bitfields_10[0] |= 1 << 1 };
     }
 

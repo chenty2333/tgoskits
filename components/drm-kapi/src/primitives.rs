@@ -490,10 +490,9 @@ pub const fn ktime_us_delta(later: i64, earlier: i64) -> i64 {
     ktime_to_us(ktime_sub(later, earlier))
 }
 
-/// `ARRAY_SIZE(array)` for fixed C-layout Rust arrays.
-#[allow(non_snake_case)]
+/// `array_size(array)` for fixed C-layout Rust arrays.
 #[inline]
-pub fn ARRAY_SIZE<T: Copy, const N: usize>(_array: [T; N]) -> usize {
+pub fn array_size<T: Copy, const N: usize>(_array: [T; N]) -> usize {
     N
 }
 

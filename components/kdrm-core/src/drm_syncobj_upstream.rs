@@ -5,7 +5,6 @@
 //! Syncobjs own ordinary Linux `dma_fence` references and timeline payloads
 //! are Linux `dma_fence_chain` nodes. VirtGPU and other drivers therefore use
 //! the same fence/sync-file representation as the rest of the DRM core.
-#![allow(non_snake_case)]
 
 use alloc::{sync::Arc, vec::Vec};
 use core::{
@@ -65,7 +64,7 @@ pub(crate) mod test_file_ops {
     };
 
     use drm_kapi::{
-        config::{ERR_PTR, IS_ERR},
+        config::{err_ptr, is_err},
         kernel_services::{FileOps, install_file_ops},
         shmem::{File, FileOperations, fget_file, fput_file, shmem_file_setup},
     };
@@ -94,11 +93,11 @@ pub(crate) mod test_file_ops {
     ) -> *mut File {
         let error = ANON_INODE_ERROR.swap(0, Ordering::SeqCst);
         if error != 0 {
-            return ERR_PTR::<File>(error);
+            return err_ptr::<File>(error);
         }
         // SAFETY: `name` is null or points to a valid null-terminated string; shmem_file_setup initializes and returns a File or error pointer.
         let file = unsafe { shmem_file_setup(name, 0, 0) };
-        if file.is_null() || IS_ERR(file) {
+        if file.is_null() || is_err(file) {
             return file.cast();
         }
         // SAFETY: `file` is confirmed non-null and not an error pointer; we have exclusive initialization access to this newly created File.
@@ -179,7 +178,7 @@ pub(crate) mod test_file_ops {
         assert!(fd >= 0);
         // SAFETY: The literal c-string pointer is null-terminated, aligned, and valid for reads.
         let file = unsafe { shmem_file_setup(c"plain-test-file".as_ptr(), 0, 0) };
-        assert!(!file.is_null() && !IS_ERR(file));
+        assert!(!file.is_null() && !is_err(file));
         // SAFETY: `file` is confirmed non-null and not an error pointer; PLAIN_FILE_OPS is static and lives for the entire test process.
         unsafe {
             (*file).f_op = ptr::addr_of!(PLAIN_FILE_OPS);
@@ -348,9 +347,9 @@ impl SyncobjWaitQueueRegistrations {
                 .expect("a wait-queue registration was just inserted");
             registration.entry.private = ptr::addr_of_mut!(registration.notifier).cast();
             // SAFETY: `registration.entry` is stored in `registrations` whose capacity was reserved upfront.
-            // INIT_LIST_HEAD initializes the embedded `ListHead` pointers to point to itself.
+            // init_list_head initializes the embedded `ListHead` pointers to point to itself.
             unsafe {
-                drm_kapi::list::INIT_LIST_HEAD(ptr::addr_of_mut!(registration.entry.entry));
+                drm_kapi::list::init_list_head(ptr::addr_of_mut!(registration.entry.entry));
             }
             // SAFETY: `head` was obtained from `object.wait.get()`, which is an initialized `WaitQueueHead`
             // outliving the wait registration. `registration.entry` has stable storage in the reserved Vec capacity.
@@ -547,7 +546,7 @@ impl DrmSyncobj {
         let mut object = Arc::new(Self {
             state: spin::Mutex::new(SyncobjState {
                 fence: None,
-                // SAFETY: Zeroed MaybeUninit satisfies ListHead layout, and is immediately initialized by INIT_LIST_HEAD below.
+                // SAFETY: Zeroed MaybeUninit satisfies ListHead layout, and is immediately initialized by init_list_head below.
                 pending_eventfds: unsafe { MaybeUninit::zeroed().assume_init() },
             }),
             // SAFETY: Zeroed MaybeUninit satisfies WaitQueueHead layout, and is immediately initialized by init_waitqueue_head below.
@@ -555,7 +554,7 @@ impl DrmSyncobj {
         });
         // SAFETY: We have unique access to `object` via Arc::get_mut; pending_eventfds is properly aligned and allocated.
         unsafe {
-            drm_kapi::list::INIT_LIST_HEAD(ptr::addr_of_mut!(
+            drm_kapi::list::init_list_head(ptr::addr_of_mut!(
                 Arc::get_mut(&mut object)
                     .unwrap()
                     .state
@@ -1179,8 +1178,8 @@ fn drm_syncobj_get_fd(syncobj: *mut DrmSyncobj) -> Result<c_int, c_int> {
             0,
         )
     };
-    if drm_kapi::config::IS_ERR(file) {
-        let error = drm_kapi::config::PTR_ERR(file);
+    if drm_kapi::config::is_err(file) {
+        let error = drm_kapi::config::ptr_err(file);
         // SAFETY: `fd` was reserved above and must be returned to the allocator on error.
         unsafe { put_unused_fd(fd) };
         return Err(error);
@@ -2305,8 +2304,8 @@ pub unsafe extern "C" fn drm_syncobj_eventfd_ioctl(
     }
     // SAFETY: `eventfd_ctx_fdget` safely looks up `args.fd` in the calling process file table.
     let eventfd_ctx = unsafe { eventfd_ctx_fdget(args.fd) };
-    if drm_kapi::config::IS_ERR(eventfd_ctx) {
-        let error = drm_kapi::config::PTR_ERR(eventfd_ctx);
+    if drm_kapi::config::is_err(eventfd_ctx) {
+        let error = drm_kapi::config::ptr_err(eventfd_ctx);
         // SAFETY: releasing acquired syncobj reference when eventfd_ctx lookup returns an error pointer.
         unsafe { drm_syncobj_put(syncobj) };
         return error;
@@ -2327,11 +2326,11 @@ pub unsafe extern "C" fn drm_syncobj_eventfd_ioctl(
         return -ENOMEM;
     }
     // SAFETY: `waiter` is non-null and allocated for `SyncobjEventfdWaiter`; `ptr::write_bytes` zero-initializes it;
-    // `INIT_LIST_HEAD` initializes `pending_node`; fields are populated with acquired references;
+    // `init_list_head` initializes `pending_node`; fields are populated with acquired references;
     // `register_eventfd` takes ownership of `waiter`; and `drm_syncobj_put` drops the local syncobj reference.
     unsafe {
         ptr::write_bytes(waiter, 0, 1);
-        drm_kapi::list::INIT_LIST_HEAD(ptr::addr_of_mut!((*waiter).pending_node));
+        drm_kapi::list::init_list_head(ptr::addr_of_mut!((*waiter).pending_node));
         (*waiter).eventfd_ctx = eventfd_ctx;
         (*waiter).point = args.point;
         (*waiter).flags = args.flags;

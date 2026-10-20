@@ -2,8 +2,6 @@
 // Copyright 2026 TheKernel contributors. See ../LICENSE-MIT.
 //! Port of Linux `drivers/gpu/drm/drm_dumb_buffers.c` helpers used by DRM clients.
 
-#![allow(non_snake_case, non_upper_case_globals)]
-
 use core::ffi::c_void;
 
 use drm_kapi::config::{EINVAL, PAGE_SIZE};

@@ -6,29 +6,16 @@
 //! sizing rules, drm_ioctl_permit, and core ioctl implementations:
 //! VERSION, GET_CAP, SET_CLIENT_CAP, GET_UNIQUE, SET_VERSION, GET_CLIENT, GET_STATS.
 
-#![allow(non_snake_case)]
-
 use core::ffi::{c_char, c_uint, c_ulong, c_void};
 
-#[cfg(not(test))]
-use drm_kapi::mutex::{mutex_lock, mutex_unlock};
 use drm_kapi::{
     config::{CAP_SYS_ADMIN, EFAULT, EINVAL, ENODEV, ENOMEM, EOPNOTSUPP, GFP_KERNEL},
     kernel_services::{capable, current_pid_vnr},
     memory::{kfree, kmalloc},
     mm_native::{copy_from_user, copy_to_user},
+    mutex::{mutex_lock, mutex_unlock},
+    types::File,
 };
-#[cfg(test)]
-/// # Safety
-///
-/// This test stub performs no memory operations; callers may safely pass any mutex pointer or placeholder.
-unsafe fn mutex_lock<M>(_mutex: M) {}
-#[cfg(test)]
-/// # Safety
-///
-/// This test stub performs no memory operations; callers may safely pass any mutex pointer or placeholder.
-unsafe fn mutex_unlock<M>(_mutex: M) {}
-use drm_kapi::types::File;
 
 const IOC_IN: u32 = 1 << 30;
 const IOC_OUT: u32 = 2 << 30;
@@ -253,10 +240,17 @@ pub unsafe extern "C" fn drm_getclient(
     }
     // SAFETY: `data` and `file_priv` are verified non-null above.
     // - `client` points to properly aligned, writable `DrmClient` memory.
-    // - Reading `(*file_priv).authenticated` is safe as `file_priv` is live per caller contract.
+    // - Reading `(*file_priv).authenticated.load(core::sync::atomic::Ordering::Relaxed)` is safe as `file_priv` is live per caller contract.
     unsafe {
         if (*client).idx == 0 {
-            (*client).auth = if (*file_priv).authenticated { 1 } else { 0 };
+            (*client).auth = if (*file_priv)
+                .authenticated
+                .load(core::sync::atomic::Ordering::Relaxed)
+            {
+                1
+            } else {
+                0
+            };
             // SAFETY: Queries the calling task PID from the active LinuxKPI task context without dereferencing raw pointers.
             let pid = current_pid_vnr();
             (*client).pid = u64::try_from(pid).unwrap_or_default();
@@ -318,7 +312,10 @@ pub unsafe extern "C" fn drm_getcap(
     // - Reading `(*dev).driver` and `(*dev).mode_config` accesses initialized fields on `dev`.
     unsafe {
         (*req).value = 0;
-        match (*req).capability as u32 {
+        let Ok(capability) = u32::try_from((*req).capability) else {
+            return -EINVAL;
+        };
+        match capability {
             DRM_CAP_TIMESTAMP_MONOTONIC => {
                 (*req).value = 1;
                 0
@@ -347,7 +344,42 @@ pub unsafe extern "C" fn drm_getcap(
                 if !drm_core_check_feature(dev, DRIVER_MODESET) {
                     return -EOPNOTSUPP;
                 }
-                match (*req).capability as u32 {
+                match capability {
+                    DRM_CAP_DUMB_PREFERRED_DEPTH => {
+                        (*req).value = (*dev).mode_config.preferred_depth as u64;
+                        0
+                    }
+                    DRM_CAP_DUMB_PREFER_SHADOW => {
+                        (*req).value = (*dev).mode_config.prefer_shadow as u64;
+                        0
+                    }
+                    DRM_CAP_ASYNC_PAGE_FLIP | DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP => {
+                        (*req).value = u64::from(
+                            (*dev).mode_config.async_page_flip
+                                && (capability == DRM_CAP_ASYNC_PAGE_FLIP
+                                    || drm_core_check_feature(dev, DRIVER_ATOMIC)),
+                        );
+                        0
+                    }
+                    DRM_CAP_PAGE_FLIP_TARGET => {
+                        (*req).value = 1;
+                        let head = core::ptr::addr_of_mut!((*dev).mode_config.crtc_list);
+                        let mut node = (*head).next;
+                        while node != head {
+                            let crtc = node
+                                .cast::<u8>()
+                                .sub(core::mem::offset_of!(crate::drm_crtc_types::DrmCrtc, head))
+                                .cast::<crate::drm_crtc_types::DrmCrtc>();
+                            if (*crtc).funcs.is_null()
+                                || (*(*crtc).funcs).page_flip_target.is_none()
+                            {
+                                (*req).value = 0;
+                                break;
+                            }
+                            node = (*node).next;
+                        }
+                        0
+                    }
                     DRM_CAP_DUMB_BUFFER => {
                         if let Some(driver) = (*dev).driver.as_ref()
                             && driver.dumb_create.is_some()
@@ -402,8 +434,8 @@ pub unsafe extern "C" fn drm_getcap(
 /// - If `dev`, `data`, or `file_priv` is null, returns `-EINVAL`.
 /// - If non-null, `dev` must point to an initialized, live `DrmDevice`.
 /// - If non-null, `data` must point to an aligned, readable `DrmSetClientCap` struct.
-/// - If non-null, `file_priv` must point to a live `DrmFile` whose client capability fields are
-///   valid for mutation without concurrent data races.
+/// - If non-null, `file_priv` must point to a live `DrmFile`; capability flags
+///   are internally atomic and may be accessed by concurrent ioctls.
 pub unsafe extern "C" fn drm_setclientcap(
     dev: *mut DrmDevice,
     data: *mut c_void,
@@ -416,24 +448,31 @@ pub unsafe extern "C" fn drm_setclientcap(
     // SAFETY: `dev`, `data`, and `file_priv` were checked non-null above.
     // - `req` points to an aligned `DrmSetClientCap` struct valid for reading `capability` and `value`.
     // - `drm_core_check_feature` is safely invoked on the initialized `dev`.
-    // - The calling thread holds exclusive access to `file_priv` during ioctl dispatch, permitting
-    //   mutation of `stereo_allowed`, `universal_planes`, `atomic`, `aspect_ratio_allowed`, and `writeback_connectors`.
+    // - Capability flags are atomic scalar preferences, not publication tokens
+    //   for other storage; relaxed accesses do not require exclusive dispatch.
     unsafe {
         if !drm_core_check_feature(dev, DRIVER_MODESET) {
             return -EOPNOTSUPP;
         }
-        match (*req).capability as u32 {
+        let Ok(capability) = u32::try_from((*req).capability) else {
+            return -EINVAL;
+        };
+        match capability {
             DRM_CLIENT_CAP_STEREO_3D => {
                 if (*req).value > 1 {
                     return -EINVAL;
                 }
-                (*file_priv).stereo_allowed = (*req).value != 0;
+                (*file_priv)
+                    .stereo_allowed
+                    .store((*req).value != 0, core::sync::atomic::Ordering::Relaxed);
             }
             DRM_CLIENT_CAP_UNIVERSAL_PLANES => {
                 if (*req).value > 1 {
                     return -EINVAL;
                 }
-                (*file_priv).universal_planes = (*req).value != 0;
+                (*file_priv)
+                    .universal_planes
+                    .store((*req).value != 0, core::sync::atomic::Ordering::Relaxed);
             }
             DRM_CLIENT_CAP_ATOMIC => {
                 if !drm_core_check_feature(dev, DRIVER_ATOMIC) {
@@ -442,24 +481,37 @@ pub unsafe extern "C" fn drm_setclientcap(
                 if (*req).value > 2 {
                     return -EINVAL;
                 }
-                (*file_priv).atomic = (*req).value != 0;
-                (*file_priv).universal_planes = (*req).value != 0;
-                (*file_priv).aspect_ratio_allowed = (*req).value != 0;
+                (*file_priv)
+                    .atomic
+                    .store((*req).value != 0, core::sync::atomic::Ordering::Relaxed);
+                (*file_priv)
+                    .universal_planes
+                    .store((*req).value != 0, core::sync::atomic::Ordering::Relaxed);
+                (*file_priv)
+                    .aspect_ratio_allowed
+                    .store((*req).value != 0, core::sync::atomic::Ordering::Relaxed);
             }
             DRM_CLIENT_CAP_ASPECT_RATIO => {
                 if (*req).value > 1 {
                     return -EINVAL;
                 }
-                (*file_priv).aspect_ratio_allowed = (*req).value != 0;
+                (*file_priv)
+                    .aspect_ratio_allowed
+                    .store((*req).value != 0, core::sync::atomic::Ordering::Relaxed);
             }
             DRM_CLIENT_CAP_WRITEBACK_CONNECTORS => {
-                if !(*file_priv).atomic {
+                if !(*file_priv)
+                    .atomic
+                    .load(core::sync::atomic::Ordering::Relaxed)
+                {
                     return -EINVAL;
                 }
                 if (*req).value > 1 {
                     return -EINVAL;
                 }
-                (*file_priv).writeback_connectors = (*req).value != 0;
+                (*file_priv)
+                    .writeback_connectors
+                    .store((*req).value != 0, core::sync::atomic::Ordering::Relaxed);
             }
             _ => return -EINVAL,
         }
@@ -511,13 +563,50 @@ pub unsafe extern "C" fn drm_setversion(
 #[unsafe(no_mangle)]
 /// # Safety
 ///
-/// This callback ignores all arguments and performs no memory operations.
-/// Any pointer values (including null or dangling pointers) may be passed safely.
+/// `data` must point to a kernel `DrmSetClientName` buffer, and `file_priv`
+/// must remain live throughout the call. Embedded user addresses are copied
+/// through the installed user-memory provider, outside the name lock.
 pub unsafe extern "C" fn drm_set_client_name(
     _dev: *mut DrmDevice,
-    _data: *mut c_void,
-    _file_priv: *mut DrmFile,
+    data: *mut c_void,
+    file_priv: *mut DrmFile,
 ) -> i32 {
+    if data.is_null() || file_priv.is_null() {
+        return -EINVAL;
+    }
+    // SAFETY: The caller supplies a live kernel request and per-open file.
+    unsafe {
+        let name = &*data.cast::<crate::uapi_drm_types::DrmSetClientName>();
+        if name.name_len > u64::from(DRM_CLIENT_NAME_MAX_LEN) {
+            return -EINVAL;
+        }
+        let len = name.name_len as usize;
+        let new_name = if len == 0 {
+            core::ptr::null_mut::<c_char>()
+        } else {
+            let buffer = kmalloc(len + 1, GFP_KERNEL).cast::<u8>();
+            if buffer.is_null() {
+                return -ENOMEM;
+            }
+            if copy_from_user(buffer.cast(), name.name as usize as *const c_void, len) != 0 {
+                kfree(buffer);
+                return -EFAULT;
+            }
+            if !core::slice::from_raw_parts(buffer, len)
+                .iter()
+                .all(|byte| (0x21..=0x7e).contains(byte))
+            {
+                kfree(buffer);
+                return -EINVAL;
+            }
+            *buffer.add(len) = 0;
+            buffer.cast()
+        };
+        mutex_lock(core::ptr::addr_of_mut!((*file_priv).client_name_lock));
+        let old_name = core::mem::replace(&mut (*file_priv).client_name, new_name);
+        mutex_unlock(core::ptr::addr_of_mut!((*file_priv).client_name_lock));
+        kfree(old_name);
+    }
     0
 }
 
@@ -535,14 +624,19 @@ pub unsafe extern "C" fn drm_ioctl_permit(flags: u32, file_priv: *mut DrmFile) -
     // SAFETY: `file_priv` is verified non-null above.
     // - `(*file_priv).minor` is guaranteed non-null and valid for an open DRM file, allowing
     //   reading `(*(*file_priv).minor).r#type` to check for render nodes.
-    // - `(*file_priv).authenticated` is safely read from the live `file_priv`.
+    // - `(*file_priv).authenticated.load(core::sync::atomic::Ordering::Relaxed)` is safely read from the live `file_priv`.
     // - `drm_is_current_master` queries the master state of `file_priv`.
     unsafe {
         if (flags & DRM_ROOT_ONLY != 0) && !capable(CAP_SYS_ADMIN) {
             return -EACCES;
         }
         let is_render = (*(*file_priv).minor).r#type == 2;
-        if (flags & DRM_AUTH != 0) && !is_render && !(*file_priv).authenticated {
+        if (flags & DRM_AUTH != 0)
+            && !is_render
+            && !(*file_priv)
+                .authenticated
+                .load(core::sync::atomic::Ordering::Relaxed)
+        {
             return -EACCES;
         }
         if (flags & DRM_MASTER != 0) && !drm_is_current_master(file_priv) {
@@ -1056,6 +1150,9 @@ pub unsafe extern "C" fn drm_ioctl(filp: *mut File, cmd: c_uint, arg: c_ulong) -
             return -ENODEV;
         }
 
+        if (cmd >> 8) & 0xff != u32::from(b'd') {
+            return -25; // ENOTTY: another device's ioctl namespace.
+        }
         let nr = cmd & 0xff;
         let is_driver = (0x40..0xa0).contains(&nr);
 
@@ -1176,6 +1273,139 @@ mod tests {
     };
 
     #[test]
+    fn kms_capabilities_preserve_known_zero_and_full_width_unknown() {
+        let mut drm = crate::test_support::TestDrm::new(DRIVER_MODESET | DRIVER_ATOMIC);
+        assert_eq!(drm.init_mode_config(), 0);
+        drm.dev.mode_config.preferred_depth = 24;
+        drm.dev.mode_config.prefer_shadow = 1;
+        for (capability, value) in [
+            (DRM_CAP_DUMB_PREFERRED_DEPTH, 24),
+            (DRM_CAP_DUMB_PREFER_SHADOW, 1),
+            (DRM_CAP_ASYNC_PAGE_FLIP, 0),
+            (DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP, 0),
+            (DRM_CAP_PAGE_FLIP_TARGET, 1),
+        ] {
+            let mut cap = DrmGetCap {
+                capability: capability as u64,
+                value: u64::MAX,
+            };
+            // SAFETY: The fixture owns the live device and writable ioctl buffer.
+            assert_eq!(
+                unsafe {
+                    drm_getcap(
+                        drm.ptr(),
+                        (&mut cap as *mut DrmGetCap).cast(),
+                        core::ptr::null_mut(),
+                    )
+                },
+                0
+            );
+            assert_eq!(cap.value, value);
+        }
+        let mut cap = DrmGetCap {
+            capability: (1u64 << 32) | DRM_CAP_DUMB_BUFFER as u64,
+            value: 1,
+        };
+        // SAFETY: Same live fixture and writable ioctl buffer.
+        assert_eq!(
+            unsafe {
+                drm_getcap(
+                    drm.ptr(),
+                    (&mut cap as *mut DrmGetCap).cast(),
+                    core::ptr::null_mut(),
+                )
+            },
+            -EINVAL
+        );
+        assert_eq!(cap.value, 0);
+        drm.cleanup_mode_config();
+    }
+
+    #[test]
+    fn client_name_replacement_validates_before_publishing() {
+        crate::test_support::init_runtime();
+        // SAFETY: All pointers refer to initialized, uniquely owned test objects.
+        unsafe {
+            let driver: DrmDriver = core::mem::zeroed();
+            let dev = drm_dev_alloc(&driver, core::ptr::null_mut());
+            let file = drm_file_alloc((*dev).primary);
+            let mut name = crate::uapi_drm_types::DrmSetClientName {
+                name_len: 6,
+                name: c"client".as_ptr() as u64,
+            };
+            assert_eq!(
+                drm_set_client_name(dev, core::ptr::addr_of_mut!(name).cast(), file),
+                0
+            );
+            assert!(!(*file).client_name.is_null());
+            assert_eq!(core::ffi::CStr::from_ptr((*file).client_name), c"client");
+            for bad in [
+                c"bad name".as_ptr(),
+                c"bad\nname".as_ptr(),
+                b"bad\0name\0".as_ptr().cast(),
+            ] {
+                name.name_len = 8;
+                name.name = bad as u64;
+                assert_eq!(
+                    drm_set_client_name(dev, core::ptr::addr_of_mut!(name).cast(), file),
+                    -EINVAL
+                );
+                assert_eq!(core::ffi::CStr::from_ptr((*file).client_name), c"client");
+            }
+            name.name_len = 1;
+            name.name = 0;
+            assert_eq!(
+                drm_set_client_name(dev, core::ptr::addr_of_mut!(name).cast(), file),
+                -EFAULT
+            );
+            name.name_len = 65;
+            assert_eq!(
+                drm_set_client_name(dev, core::ptr::addr_of_mut!(name).cast(), file),
+                -EINVAL
+            );
+            name.name_len = 0;
+            assert_eq!(
+                drm_set_client_name(dev, core::ptr::addr_of_mut!(name).cast(), file),
+                0
+            );
+            assert!((*file).client_name.is_null());
+            drm_file_free(file);
+            drm_dev_put(dev);
+        }
+    }
+
+    #[test]
+    fn pending_signal_interrupts_input_fence_wait_without_signaling_it() {
+        crate::test_support::init_runtime();
+        let fence = crate::drm_syncobj_upstream::drm_syncobj_fence_create();
+        assert!(!fence.is_null());
+        crate::test_support::with_task_policy(false, true, || {
+            // SAFETY: The test holds the fence reference until after both waits.
+            unsafe {
+                assert_eq!(
+                    drm_kapi::dma_fence::dma_fence_wait_timeout(fence, true, 1),
+                    -(drm_kapi::config::ERESTARTSYS as i64)
+                );
+                assert!(!drm_kapi::dma_fence::dma_fence_is_signaled(fence));
+            }
+        });
+        // SAFETY: The test still retains its software fence; completion must
+        // win over a zero timeout in both the wrapper and direct default op.
+        unsafe {
+            crate::drm_syncobj_upstream::drm_syncobj_fence_signal(fence, 0);
+            assert_eq!(
+                drm_kapi::dma_fence::dma_fence_wait_timeout(fence, false, 0),
+                1
+            );
+            assert_eq!(
+                drm_kapi::dma_fence::dma_fence_default_wait(fence, false, 0),
+                1
+            );
+            crate::drm_syncobj_upstream::drm_syncobj_fence_put(fence);
+        }
+    }
+
+    #[test]
     fn test_ioctl_permit_flags() {
         crate::test_support::init_runtime();
         // SAFETY: Test allocates mock DrmDevice and DrmFile structures to test ioctl permit logic, then cleans them up.
@@ -1195,15 +1425,21 @@ mod tests {
             assert_eq!(drm_ioctl_permit(DRM_ROOT_ONLY, primary_file), -EACCES);
 
             // 2. DRM_AUTH on primary file:
-            (*primary_file).authenticated = false;
+            (*primary_file)
+                .authenticated
+                .store(false, core::sync::atomic::Ordering::Relaxed);
             assert_eq!(drm_ioctl_permit(DRM_AUTH, primary_file), -EACCES);
-            (*primary_file).authenticated = true;
+            (*primary_file)
+                .authenticated
+                .store(true, core::sync::atomic::Ordering::Relaxed);
             assert_eq!(drm_ioctl_permit(DRM_AUTH, primary_file), 0);
 
             // 3. DRM_MASTER on primary file:
             // Since primary_file was first opened, it is master
             assert_eq!(drm_ioctl_permit(DRM_MASTER, primary_file), 0);
-            (*primary_file).is_master = false;
+            (*primary_file)
+                .is_master
+                .store(false, core::sync::atomic::Ordering::Relaxed);
             assert_eq!(drm_ioctl_permit(DRM_MASTER, primary_file), -EACCES);
 
             // 4. Render node permissions:
@@ -1212,7 +1448,9 @@ mod tests {
             // With DRM_RENDER_ALLOW -> 0
             assert_eq!(drm_ioctl_permit(DRM_RENDER_ALLOW, render_file), 0);
             // With DRM_RENDER_ALLOW | DRM_AUTH -> bypasses AUTH check on render node
-            (*render_file).authenticated = false;
+            (*render_file)
+                .authenticated
+                .store(false, core::sync::atomic::Ordering::Relaxed);
             assert_eq!(
                 drm_ioctl_permit(DRM_RENDER_ALLOW | DRM_AUTH, render_file),
                 0
@@ -1282,7 +1520,10 @@ mod tests {
             let filp = &mut filp_struct as *mut File;
 
             // 1. Unknown ioctl: nr 0xff (unknown core ioctl) -> -EINVAL
-            assert_eq!(drm_ioctl(filp, 0x0000_00ff, 0), -EINVAL);
+            assert_eq!(drm_ioctl(filp, 0x0000_64ff, 0), -EINVAL);
+
+            // A different ioctl namespace must not run the same-numbered callback.
+            assert_eq!(drm_ioctl(filp, (b'x' as u32) << 8, 0), -25);
 
             // 2. Standard core ioctl: DRM_IOCTL_VERSION
             let mut version_data: DrmVersion = core::mem::zeroed();
@@ -1301,7 +1542,7 @@ mod tests {
             struct AlignedBuf<const N: usize>([u8; N]);
 
             let mut user_buf_8 = AlignedBuf([0xaa; 8]);
-            let cmd_user_8 = (8u32 << 16) | 0x40;
+            let cmd_user_8 = (8u32 << 16) | 0x6440;
             RECEIVED_A.store(0, Ordering::SeqCst);
             RECEIVED_B.store(0, Ordering::SeqCst);
             let ret = drm_ioctl(filp, cmd_user_8, user_buf_8.0.as_mut_ptr() as usize as u64);
@@ -1314,7 +1555,7 @@ mod tests {
             let d_in = user_buf_24.0.as_mut_ptr().cast::<DriverTestData>();
             (*d_in).a = 0x5555;
             (*d_in).b = 0x6666;
-            let cmd_user_24 = (24u32 << 16) | 0x40;
+            let cmd_user_24 = (24u32 << 16) | 0x6440;
             let ret = drm_ioctl(
                 filp,
                 cmd_user_24,

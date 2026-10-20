@@ -18,10 +18,9 @@ use drm_kapi::{
         dma_fence_signal,
     },
     dma_resv::{dma_resv_add_fence, dma_resv_reserve_fences},
-    locks::{spin_lock_irq, spin_unlock_irq},
     memory::{kfree, kmalloc},
     types::{DmaFence, DmaFenceOps, Spinlock, WorkStruct},
-    workqueue::{INIT_WORK_C, queue_work, system_dfl_wq},
+    workqueue::{SYSTEM_DFL_WQ, init_work_c, queue_work},
 };
 use kdrm_core::{
     drm_crtc_types::DrmCrtc,
@@ -30,8 +29,9 @@ use kdrm_core::{
     drm_gem_types::DrmGemObject,
     drm_gem_upstream::{drm_gem_object_get, drm_gem_object_put},
     drm_vblank_types::DrmPendingVblankEvent,
-    drm_vblank_upstream::drm_crtc_send_vblank_event,
 };
+
+use super::presentation::send_event;
 
 const NEG_EIO: i32 = -drm_kapi::config::EIO;
 
@@ -97,7 +97,7 @@ unsafe impl Send for CompletionQueue {}
 
 impl CompletionQueue {
     fn new() -> Self {
-        // SAFETY: WorkStruct is a C work-item record whose INIT_WORK_C
+        // SAFETY: WorkStruct is a C work-item record whose init_work_c
         // initializer writes its data/list/callback fields before queueing.
         let work = unsafe { MaybeUninit::<WorkStruct>::zeroed().assume_init() };
         Self {
@@ -131,7 +131,7 @@ pub(crate) fn init() {
     // SAFETY: The LazyInit static gives the work record a stable address for
     // the queue's entire lifetime. The runtime workqueue provider is installed
     // before this function is called by ax-drm initialization.
-    unsafe { INIT_WORK_C(&mut *queue.work.get(), completion_worker) };
+    unsafe { init_work_c(&mut *queue.work.get(), completion_worker) };
     FENCE_CONTEXT.store(dma_fence_context_alloc(1), Ordering::Release);
 }
 
@@ -281,8 +281,9 @@ pub(crate) unsafe fn track_read_completion(
     event: *mut DrmPendingVblankEvent,
 ) {
     if completion == Completion::Complete {
-        // SAFETY: Complete means no device use remains; sending the atomic
-        // event now is the same completion edge as the RDIF result.
+        // RDIF command completion releases device-use owners, but presentation
+        // still completes at the next vblank on an active CRTC.
+        // SAFETY: The caller owns the event and retains the live CRTC.
         unsafe { send_event(event_crtc, event) };
         return;
     }
@@ -351,7 +352,7 @@ fn schedule_completion_worker() {
     queue.requested.store(true, Ordering::Release);
     // SAFETY: `work` is initialized by `init`, lives in a static LazyInit, and
     // queue_work is safe to call from the notifier's short callback context.
-    unsafe { queue_work(system_dfl_wq, &mut *queue.work.get()) };
+    unsafe { queue_work(SYSTEM_DFL_WQ, &mut *queue.work.get()) };
 }
 
 /// # Safety
@@ -427,27 +428,6 @@ fn wait_for_completion(completion: Completion) -> Result<(), GpuError> {
                 }
             }
         }
-    }
-}
-
-/// # Safety
-/// If non-null, `crtc` and `event` must point to live, properly initialized `DrmCrtc` and `DrmPendingVblankEvent`.
-unsafe fn send_event(crtc: *mut DrmCrtc, event: *mut DrmPendingVblankEvent) {
-    if crtc.is_null() || event.is_null() {
-        return;
-    }
-    // drm_crtc_send_vblank_event expects event_lock held, as in the upstream
-    // simple-KMS atomic_flush helper. This runs after wait_completion has left
-    // the GPU lock, so event/fence callbacks cannot re-enter ax-gpu under it.
-    // SAFETY: 'crtc' and 'event' are non-null and valid. (*crtc).dev is checked against null before accessing event_lock.
-    unsafe {
-        let dev = (*crtc).dev;
-        if dev.is_null() {
-            return;
-        }
-        spin_lock_irq(&mut (*dev).event_lock);
-        drm_crtc_send_vblank_event(crtc, event);
-        spin_unlock_irq(&mut (*dev).event_lock);
     }
 }
 

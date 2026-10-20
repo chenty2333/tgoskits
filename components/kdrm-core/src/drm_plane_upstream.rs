@@ -14,7 +14,6 @@
 
 // The Linux ports state the invariant of each C-ABI call once in the module
 // header, as the GT ports do; per-block SAFETY prose is not repeated.
-#![allow(non_snake_case)]
 
 use core::{
     ffi::{c_char, c_void},
@@ -25,7 +24,7 @@ use drm_kapi::{
     assert::warn_on,
     config::{
         EBUSY, EDEADLK, EFAULT, EINVAL, ENOENT, ENOMEM, ENXIO, EOPNOTSUPP, ERANGE, GFP_KERNEL,
-        IS_ERR, PTR_ERR,
+        is_err, ptr_err,
     },
 };
 
@@ -332,7 +331,7 @@ unsafe fn create_in_format_blob(
         let formats_size = size_of::<u32>() * (*plane).format_count as usize;
         if warn_on(formats_size == 0) {
             // 0 formats are never expected
-            return drm_kapi::config::ERR_PTR::<DrmPropertyBlob>(-EINVAL);
+            return drm_kapi::config::err_ptr::<DrmPropertyBlob>(-EINVAL);
         }
 
         let modifiers_size = size_of::<DrmFormatModifier>() * (*plane).modifier_count as usize;
@@ -344,7 +343,7 @@ unsafe fn create_in_format_blob(
         blob_size += modifiers_size;
 
         let blob = drm_property_create_blob(dev, blob_size, core::ptr::null());
-        if IS_ERR(blob) {
+        if is_err(blob) {
             return blob;
         }
 
@@ -440,18 +439,26 @@ unsafe fn drm_plane_create_hotspot_properties(plane: *mut DrmPlane) -> i32 {
 /// - `format_modifiers`, if non-null, must point to an array of valid format modifiers.
 /// - `name`, if non-null, must point to a valid null-terminated C string.
 // Keeps the Linux function signature.
-#[allow(clippy::too_many_arguments)]
+struct PlaneFormats {
+    formats: *const u32,
+    format_count: u32,
+    format_modifiers: *const u64,
+}
+
 unsafe fn __drm_universal_plane_init(
     dev: *mut DrmDevice,
     plane: *mut DrmPlane,
     possible_crtcs: u32,
     funcs: *const DrmPlaneFuncs,
-    formats: *const u32,
-    format_count: u32,
-    format_modifiers: *const u64,
+    supported: PlaneFormats,
     plane_type: u32,
     name: *const c_char,
 ) -> i32 {
+    let PlaneFormats {
+        formats,
+        format_count,
+        format_modifiers,
+    } = supported;
     // SAFETY: `dev` is a live device and `plane` points to destination storage; initializing
     // plane mutex, mode object, format types array, and default properties without aliasing.
     unsafe {
@@ -583,7 +590,7 @@ unsafe fn __drm_universal_plane_init(
 
         if format_modifier_count != 0 {
             let blob = create_in_format_blob(dev, plane, (*funcs).format_mod_supported);
-            if !IS_ERR(blob) {
+            if !is_err(blob) {
                 drm_object_attach_property(
                     base,
                     (*config).modifiers_property,
@@ -594,7 +601,7 @@ unsafe fn __drm_universal_plane_init(
 
         if (*funcs).format_mod_supported_async.is_some() {
             let blob = create_in_format_blob(dev, plane, (*funcs).format_mod_supported_async);
-            if !IS_ERR(blob) {
+            if !is_err(blob) {
                 drm_object_attach_property(
                     base,
                     (*config).async_modifiers_property,
@@ -638,9 +645,11 @@ pub unsafe extern "C" fn drm_universal_plane_init(
             plane,
             possible_crtcs,
             funcs,
-            formats,
-            format_count,
-            format_modifiers,
+            PlaneFormats {
+                formats,
+                format_count,
+                format_modifiers,
+            },
             plane_type,
             name,
         )
@@ -690,12 +699,12 @@ pub unsafe extern "C" fn __drmm_universal_plane_alloc(
     // address at `offset`, initializing it via `__drm_universal_plane_init`, and registering the cleanup action.
     unsafe {
         if warn_on(funcs.is_null() || (*funcs).destroy.is_some()) {
-            return drm_kapi::config::ERR_PTR::<c_void>(-EINVAL);
+            return drm_kapi::config::err_ptr::<c_void>(-EINVAL);
         }
 
         let container = drm_kapi::memory::drmm_kzalloc_c(dev as *mut c_void, size, GFP_KERNEL);
         if container.is_null() {
-            return drm_kapi::config::ERR_PTR::<c_void>(-ENOMEM);
+            return drm_kapi::config::err_ptr::<c_void>(-ENOMEM);
         }
 
         let plane = (container as *mut u8).add(offset) as *mut DrmPlane;
@@ -704,14 +713,16 @@ pub unsafe extern "C" fn __drmm_universal_plane_alloc(
             plane,
             possible_crtcs,
             funcs,
-            formats,
-            format_count,
-            format_modifiers,
+            PlaneFormats {
+                formats,
+                format_count,
+                format_modifiers,
+            },
             plane_type,
             name,
         );
         if ret != 0 {
-            return drm_kapi::config::ERR_PTR::<c_void>(ret);
+            return drm_kapi::config::err_ptr::<c_void>(ret);
         }
 
         let ret = drm_kapi::kernel_core::drmm_add_action_or_reset(
@@ -720,7 +731,7 @@ pub unsafe extern "C" fn __drmm_universal_plane_alloc(
             plane as *mut c_void,
         );
         if ret != 0 {
-            return drm_kapi::config::ERR_PTR::<c_void>(ret);
+            return drm_kapi::config::err_ptr::<c_void>(ret);
         }
 
         container
@@ -754,12 +765,12 @@ pub unsafe extern "C" fn __drm_universal_plane_alloc(
     // `offset`, initializing it via `__drm_universal_plane_init`, and freeing on failure.
     unsafe {
         if warn_on(funcs.is_null()) {
-            return drm_kapi::config::ERR_PTR::<c_void>(-EINVAL);
+            return drm_kapi::config::err_ptr::<c_void>(-EINVAL);
         }
 
         let container = drm_kapi::memory::kzalloc(size, GFP_KERNEL);
         if container.is_null() {
-            return drm_kapi::config::ERR_PTR::<c_void>(-ENOMEM);
+            return drm_kapi::config::err_ptr::<c_void>(-ENOMEM);
         }
 
         let plane = (container as *mut u8).add(offset) as *mut DrmPlane;
@@ -768,15 +779,17 @@ pub unsafe extern "C" fn __drm_universal_plane_alloc(
             plane,
             possible_crtcs,
             funcs,
-            formats,
-            format_count,
-            format_modifiers,
+            PlaneFormats {
+                formats,
+                format_count,
+                format_modifiers,
+            },
             plane_type,
             name,
         );
         if ret != 0 {
             drm_kapi::memory::kfree(container);
-            return drm_kapi::config::ERR_PTR::<c_void>(ret);
+            return drm_kapi::config::err_ptr::<c_void>(ret);
         }
         container
     }
@@ -1024,7 +1037,11 @@ pub unsafe extern "C" fn drm_mode_getplane_res(
         drm_for_each_plane(dev, |plane| {
             // Unless userspace set the 'universal planes' capability bit, only
             // advertise overlays.
-            if (*plane).r#type != DRM_PLANE_TYPE_OVERLAY && !(*file_priv).universal_planes {
+            if (*plane).r#type != DRM_PLANE_TYPE_OVERLAY
+                && !(*file_priv)
+                    .universal_planes
+                    .load(core::sync::atomic::Ordering::Relaxed)
+            {
                 return true;
             }
 
@@ -1033,8 +1050,12 @@ pub unsafe extern "C" fn drm_mode_getplane_res(
             // planes because they'll be broken due to missing cursor hotspot info.
             if (*plane).r#type == DRM_PLANE_TYPE_CURSOR
                 && drm_core_check_feature(dev, DRIVER_CURSOR_HOTSPOT)
-                && (*file_priv).atomic
-                && !(*file_priv).supports_virtualized_cursor_plane
+                && (*file_priv)
+                    .atomic
+                    .load(core::sync::atomic::Ordering::Relaxed)
+                && !(*file_priv)
+                    .supports_virtualized_cursor_plane
+                    .load(core::sync::atomic::Ordering::Relaxed)
             {
                 return true;
             }
@@ -1194,17 +1215,8 @@ pub unsafe extern "C" fn drm_plane_has_format(
 
 /// Checks a legacy plane update against the plane's CRTC mask, its format
 /// list and the CRTC/source coordinates.
-// upstream: drm_plane.c __setplane_check()
-/// # Safety
-/// `plane` must point to an initialized `DrmPlane` belonging to the same device as `crtc`.
-/// `crtc` and `fb` must be valid, initialized pointers with valid `format` metadata.
-/// Caller must hold the modeset locks.
-// Keeps the Linux function signature.
-#[allow(clippy::too_many_arguments)]
-unsafe fn __setplane_check(
-    plane: *mut DrmPlane,
-    crtc: *mut DrmCrtc,
-    fb: *mut DrmFramebuffer,
+#[derive(Clone, Copy)]
+struct PlaneCoordinates {
     crtc_x: i32,
     crtc_y: i32,
     crtc_w: u32,
@@ -1213,7 +1225,30 @@ unsafe fn __setplane_check(
     src_y: u32,
     src_w: u32,
     src_h: u32,
+}
+
+// upstream: drm_plane.c __setplane_check()
+/// # Safety
+/// `plane` must point to an initialized `DrmPlane` belonging to the same device as `crtc`.
+/// `crtc` and `fb` must be valid, initialized pointers with valid `format` metadata.
+/// Caller must hold the modeset locks.
+// Rust groups related inputs; exported C entry points retain their ABI.
+unsafe fn __setplane_check(
+    plane: *mut DrmPlane,
+    crtc: *mut DrmCrtc,
+    fb: *mut DrmFramebuffer,
+    coordinates: PlaneCoordinates,
 ) -> i32 {
+    let PlaneCoordinates {
+        crtc_x,
+        crtc_y,
+        crtc_w,
+        crtc_h,
+        src_x,
+        src_y,
+        src_w,
+        src_h,
+    } = coordinates;
     // SAFETY: `plane`, `crtc`, and `fb` are valid pointers checked by caller or guarded by modeset locks.
     // `plane->possible_crtcs` and format access read initialized fields.
     unsafe {
@@ -1274,22 +1309,24 @@ pub unsafe extern "C" fn drm_any_plane_has_format(
 /// `plane` and its device must be valid pointers. Caller must hold the modeset locks associated
 /// with `plane` and `crtc`. `ctx` must be an initialized modeset acquire context or null if not used.
 /// If `fb` is non-null, it and `crtc` must be valid objects.
-// Keeps the Linux function signature.
-#[allow(clippy::too_many_arguments)]
+// Rust groups related inputs; exported C entry points retain their ABI.
 unsafe fn __setplane_internal(
     plane: *mut DrmPlane,
     crtc: *mut DrmCrtc,
     fb: *mut DrmFramebuffer,
-    crtc_x: i32,
-    crtc_y: i32,
-    crtc_w: u32,
-    crtc_h: u32,
-    src_x: u32,
-    src_y: u32,
-    src_w: u32,
-    src_h: u32,
+    coordinates: PlaneCoordinates,
     ctx: *mut DrmModesetAcquireCtx,
 ) -> i32 {
+    let PlaneCoordinates {
+        crtc_x,
+        crtc_y,
+        crtc_w,
+        crtc_h,
+        src_x,
+        src_y,
+        src_w,
+        src_h,
+    } = coordinates;
     // SAFETY: `plane` is valid under caller modeset lock; driver callbacks (`disable_plane` or `update_plane`)
     // are called with valid object pointers and acquire context `ctx`. Framebuffer references are adjusted
     // with `drm_mode_object_get`/`put`.
@@ -1310,7 +1347,19 @@ unsafe fn __setplane_internal(
             }
         } else {
             ret = __setplane_check(
-                plane, crtc, fb, crtc_x, crtc_y, crtc_w, crtc_h, src_x, src_y, src_w, src_h,
+                plane,
+                crtc,
+                fb,
+                PlaneCoordinates {
+                    crtc_x,
+                    crtc_y,
+                    crtc_w,
+                    crtc_h,
+                    src_x,
+                    src_y,
+                    src_w,
+                    src_h,
+                },
             );
             if ret == 0 {
                 (*plane).old_fb = (*plane).fb;
@@ -1342,22 +1391,24 @@ unsafe fn __setplane_internal(
 /// # Safety
 /// `plane` must be a valid pointer to an atomic-enabled plane.
 /// Modeset locks must be held. If `fb` is non-null, `fb` and `crtc` must be valid objects.
-// Keeps the Linux function signature.
-#[allow(clippy::too_many_arguments)]
+// Rust groups related inputs; exported C entry points retain their ABI.
 unsafe fn __setplane_atomic(
     plane: *mut DrmPlane,
     crtc: *mut DrmCrtc,
     fb: *mut DrmFramebuffer,
-    crtc_x: i32,
-    crtc_y: i32,
-    crtc_w: u32,
-    crtc_h: u32,
-    src_x: u32,
-    src_y: u32,
-    src_w: u32,
-    src_h: u32,
+    coordinates: PlaneCoordinates,
     ctx: *mut DrmModesetAcquireCtx,
 ) -> i32 {
+    let PlaneCoordinates {
+        crtc_x,
+        crtc_y,
+        crtc_w,
+        crtc_h,
+        src_x,
+        src_y,
+        src_w,
+        src_h,
+    } = coordinates;
     // SAFETY: `plane` is valid and its driver uses atomic modeset. Driver callbacks are called
     // with valid plane, crtc, fb and acquire context `ctx`.
     unsafe {
@@ -1372,7 +1423,19 @@ unsafe fn __setplane_atomic(
         // cursor/"async" .update_plane() tricks don't call that so we still need
         // this here.
         let ret = __setplane_check(
-            plane, crtc, fb, crtc_x, crtc_y, crtc_w, crtc_h, src_x, src_y, src_w, src_h,
+            plane,
+            crtc,
+            fb,
+            PlaneCoordinates {
+                crtc_x,
+                crtc_y,
+                crtc_w,
+                crtc_h,
+                src_x,
+                src_y,
+                src_w,
+                src_h,
+            },
         );
         if ret != 0 {
             return ret;
@@ -1389,21 +1452,23 @@ unsafe fn __setplane_atomic(
 /// # Safety
 /// `plane` must be a valid pointer to DrmPlane with valid `dev`.
 /// `crtc` and `fb` must be valid if non-null. Caller must ensure device lifetime spans the call.
-// Keeps the Linux function signature.
-#[allow(clippy::too_many_arguments)]
+// Rust groups related inputs; exported C entry points retain their ABI.
 unsafe fn setplane_internal(
     plane: *mut DrmPlane,
     crtc: *mut DrmCrtc,
     fb: *mut DrmFramebuffer,
-    crtc_x: i32,
-    crtc_y: i32,
-    crtc_w: u32,
-    crtc_h: u32,
-    src_x: u32,
-    src_y: u32,
-    src_w: u32,
-    src_h: u32,
+    coordinates: PlaneCoordinates,
 ) -> i32 {
+    let PlaneCoordinates {
+        crtc_x,
+        crtc_y,
+        crtc_w,
+        crtc_h,
+        src_x,
+        src_y,
+        src_w,
+        src_h,
+    } = coordinates;
     // SAFETY: `plane` is a valid pointer with valid `dev`. `with_modeset_lock_all` acquires the
     // necessary modeset locks on `dev` before calling the atomic or legacy plane update helpers.
     unsafe {
@@ -1413,13 +1478,37 @@ unsafe fn setplane_internal(
             |ctx| {
                 if drm_drv_uses_atomic_modeset((*plane).dev) {
                     __setplane_atomic(
-                        plane, crtc, fb, crtc_x, crtc_y, crtc_w, crtc_h, src_x, src_y, src_w,
-                        src_h, ctx,
+                        plane,
+                        crtc,
+                        fb,
+                        PlaneCoordinates {
+                            crtc_x,
+                            crtc_y,
+                            crtc_w,
+                            crtc_h,
+                            src_x,
+                            src_y,
+                            src_w,
+                            src_h,
+                        },
+                        ctx,
                     )
                 } else {
                     __setplane_internal(
-                        plane, crtc, fb, crtc_x, crtc_y, crtc_w, crtc_h, src_x, src_y, src_w,
-                        src_h, ctx,
+                        plane,
+                        crtc,
+                        fb,
+                        PlaneCoordinates {
+                            crtc_x,
+                            crtc_y,
+                            crtc_w,
+                            crtc_h,
+                            src_x,
+                            src_y,
+                            src_w,
+                            src_h,
+                        },
+                        ctx,
                     )
                 }
             },
@@ -1478,14 +1567,16 @@ pub unsafe extern "C" fn drm_mode_setplane(
             plane,
             crtc,
             fb,
-            (*plane_req).crtc_x,
-            (*plane_req).crtc_y,
-            (*plane_req).crtc_w,
-            (*plane_req).crtc_h,
-            (*plane_req).src_x,
-            (*plane_req).src_y,
-            (*plane_req).src_w,
-            (*plane_req).src_h,
+            PlaneCoordinates {
+                crtc_x: (*plane_req).crtc_x,
+                crtc_y: (*plane_req).crtc_y,
+                crtc_w: (*plane_req).crtc_w,
+                crtc_h: (*plane_req).crtc_h,
+                src_x: (*plane_req).src_x,
+                src_y: (*plane_req).src_y,
+                src_w: (*plane_req).src_w,
+                src_h: (*plane_req).src_h,
+            },
         );
 
         if !fb.is_null() {
@@ -1535,9 +1626,9 @@ unsafe fn drm_mode_cursor_universal(
         if (*req).flags & DRM_MODE_CURSOR_BO != 0 {
             if (*req).handle != 0 {
                 fb = drm_internal_framebuffer_create(dev, &fbreq, file_priv);
-                if IS_ERR(fb) {
+                if is_err(fb) {
                     // DRM_DEBUG_KMS("failed to wrap cursor buffer in drm framebuffer\n")
-                    return PTR_ERR(fb);
+                    return ptr_err(fb);
                 }
 
                 if !(*plane).hotspot_x_property.is_null() && !(*plane).state.is_null() {
@@ -1575,11 +1666,37 @@ unsafe fn drm_mode_cursor_universal(
 
         let ret: i32 = if drm_drv_uses_atomic_modeset(dev) {
             __setplane_atomic(
-                plane, crtc, fb, crtc_x, crtc_y, crtc_w, crtc_h, 0, 0, src_w, src_h, ctx,
+                plane,
+                crtc,
+                fb,
+                PlaneCoordinates {
+                    crtc_x,
+                    crtc_y,
+                    crtc_w,
+                    crtc_h,
+                    src_x: 0,
+                    src_y: 0,
+                    src_w,
+                    src_h,
+                },
+                ctx,
             )
         } else {
             __setplane_internal(
-                plane, crtc, fb, crtc_x, crtc_y, crtc_w, crtc_h, 0, 0, src_w, src_h, ctx,
+                plane,
+                crtc,
+                fb,
+                PlaneCoordinates {
+                    crtc_x,
+                    crtc_y,
+                    crtc_w,
+                    crtc_h,
+                    src_x: 0,
+                    src_y: 0,
+                    src_w,
+                    src_h,
+                },
+                ctx,
             )
         };
 
@@ -2097,7 +2214,7 @@ pub unsafe extern "C" fn drm_create_scaling_filter_prop(
             (supported_filters & !valid_mode_mask) != 0
                 || (supported_filters & (1u32 << DRM_SCALING_FILTER_DEFAULT)) == 0,
         ) {
-            return drm_kapi::config::ERR_PTR::<DrmProperty>(-EINVAL);
+            return drm_kapi::config::err_ptr::<DrmProperty>(-EINVAL);
         }
 
         let prop = drm_property_create(
@@ -2107,7 +2224,7 @@ pub unsafe extern "C" fn drm_create_scaling_filter_prop(
             supported_filters.count_ones() as i32,
         );
         if prop.is_null() {
-            return drm_kapi::config::ERR_PTR::<DrmProperty>(-ENOMEM);
+            return drm_kapi::config::err_ptr::<DrmProperty>(-ENOMEM);
         }
 
         for (value, name) in props.iter() {
@@ -2117,7 +2234,7 @@ pub unsafe extern "C" fn drm_create_scaling_filter_prop(
             let ret = drm_property_add_enum(prop, *value as u64, name.as_ptr().cast::<c_char>());
             if ret != 0 {
                 drm_property_destroy(dev, prop);
-                return drm_kapi::config::ERR_PTR::<DrmProperty>(ret);
+                return drm_kapi::config::err_ptr::<DrmProperty>(ret);
             }
         }
 
@@ -2137,8 +2254,8 @@ pub unsafe extern "C" fn drm_plane_create_scaling_filter_property(
     // SAFETY: `plane` is a valid pointer to DrmPlane; `plane->dev` is initialized.
     unsafe {
         let prop = drm_create_scaling_filter_prop((*plane).dev, supported_filters);
-        if IS_ERR(prop) {
-            return PTR_ERR(prop);
+        if is_err(prop) {
+            return ptr_err(prop);
         }
 
         drm_object_attach_property(
@@ -2176,8 +2293,8 @@ pub unsafe extern "C" fn drm_plane_add_size_hints_property(
         // array_size(sizeof(hints[0]), num_hints): saturates to SIZE_MAX on overflow
         let size = size_of::<DrmPlaneSizeHint>().saturating_mul(num_hints as usize);
         let blob = drm_property_create_blob(dev, size, hints as *const c_void);
-        if IS_ERR(blob) {
-            return PTR_ERR(blob);
+        if is_err(blob) {
+            return ptr_err(blob);
         }
 
         drm_object_attach_property(
@@ -2249,7 +2366,7 @@ mod tests {
     use core::mem::zeroed;
     use std::boxed::Box;
 
-    use drm_kapi::list::INIT_LIST_HEAD;
+    use drm_kapi::list::init_list_head;
 
     use super::*;
     use crate::{test_support::TestDrm, uapi_drm_consts::DRM_FORMAT_XRGB8888};
@@ -2267,7 +2384,7 @@ mod tests {
         // SAFETY: Test harness setup: `dev` is valid from `TestDrm`; `p0` and `p1` are boxed zeroed
         // planes with valid list heads added to `mode_config.plane_list`.
         unsafe {
-            INIT_LIST_HEAD(core::ptr::addr_of_mut!((*dev).mode_config.plane_list));
+            init_list_head(core::ptr::addr_of_mut!((*dev).mode_config.plane_list));
             let p0: *mut DrmPlane = Box::into_raw(Box::new(zeroed()));
             let p1: *mut DrmPlane = Box::into_raw(Box::new(zeroed()));
             (*p0).index = 0;

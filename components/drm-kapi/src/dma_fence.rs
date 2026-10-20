@@ -18,7 +18,7 @@ use core::{
 
 use crate::{
     config::{CONFIG_HZ, EINVAL, ENOENT, ERESTARTSYS, MAX_SCHEDULE_TIMEOUT},
-    list::{INIT_LIST_HEAD, list_add_tail, list_del_init, list_empty, list_splice_init},
+    list::{init_list_head, list_add_tail, list_del_init, list_empty, list_splice_init},
     locks::{spin_lock_irqsave_raw, spin_unlock_irqrestore_raw},
     memory::{
         kfree, kref_get_unless_zero, kref_init, kref_put, kzalloc_obj, refcount_inc_not_zero,
@@ -28,7 +28,7 @@ use crate::{
     types::{
         DmaFence, DmaFenceCb, DmaFenceOps, DmaFenceTimestamp, Kref, ListHead, RcuHead, Spinlock,
     },
-    wait::{wait_until, wait_until_ready},
+    wait::wait_until_ready,
 };
 
 /// Bit positions of `DmaFence::flags`, matching the layout drivers test directly.
@@ -469,7 +469,7 @@ pub unsafe extern "C" fn dma_fence_default_wait(
     // SAFETY: the fence is live per the contract.
     let done = || unsafe { is_done_flag(fence) };
     if done() {
-        return timeout;
+        return if timeout != 0 { timeout } else { 1 };
     }
     let task = current_task_ptr();
     // SAFETY: `task` is null or the current task, as produced by `current_task_ptr`.
@@ -498,6 +498,9 @@ pub unsafe extern "C" fn dma_fence_default_wait(
             0
         };
     }
+    if timeout == MAX_SCHEDULE_TIMEOUT as c_long {
+        return timeout;
+    }
     let spent_ticks = nanos_to_ticks(crate::clock::now_ns().saturating_sub(started));
     timeout.saturating_sub(spent_ticks as c_long).max(1)
 }
@@ -516,7 +519,7 @@ pub unsafe extern "C" fn dma_fence_default_wait(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dma_fence_wait_timeout(
     fence: *mut DmaFence,
-    _interruptible: bool,
+    interruptible: bool,
     timeout: c_long,
 ) -> c_long {
     assert!(!fence.is_null());
@@ -534,22 +537,14 @@ pub unsafe extern "C" fn dma_fence_wait_timeout(
     // SAFETY: the fence is live and the caller may block, per the contract.
     unsafe { dma_fence_enable_sw_signaling(fence) };
 
-    let unbounded = timeout as u64 >= MAX_SCHEDULE_TIMEOUT;
-    let budget_ns = if unbounded {
-        u64::MAX
-    } else {
-        ticks_to_nanos(timeout as u64)
-    };
-    let started = crate::clock::now_ns();
-    let predicate = || unsafe { dma_fence_is_signaled(fence) };
-    if wait_until(budget_ns, predicate, true) {
-        return 0;
-    }
-    if unbounded {
-        return timeout;
-    }
-    let spent_ticks = nanos_to_ticks(crate::clock::now_ns().saturating_sub(started));
-    (timeout - spent_ticks as c_long).max(1)
+    // The driver hook and the default implementation share Linux's return
+    // contract: positive remaining ticks, zero timeout, negative interruption.
+    // SAFETY: The caller retains the live fence, including its static ops table.
+    let wait = unsafe { ops_of(fence) }
+        .and_then(|ops| ops.wait)
+        .unwrap_or(dma_fence_default_wait);
+    // SAFETY: Forward the same reference, sleepability and timeout contract.
+    unsafe { wait(fence, interruptible, timeout) }
 }
 
 /// Initialize a fence in caller-provided storage.
@@ -595,7 +590,7 @@ pub unsafe extern "C" fn dma_fence_init(
                 prev: ptr::null_mut(),
             }),
         });
-        INIT_LIST_HEAD(callback_list(fence));
+        init_list_head(callback_list(fence));
         (*fence).context = context;
         (*fence).seqno = seqno;
         (*fence).error = 0;
@@ -687,7 +682,7 @@ unsafe fn signal_with_lock(fence: *mut DmaFence, timestamp: Option<i64>) {
     // SAFETY: the local list head is valid; the callback list is valid while
     // pending, and it is emptied before the timestamp overwrites that storage.
     unsafe {
-        INIT_LIST_HEAD(pending_head);
+        init_list_head(pending_head);
         list_splice_init(callback_list(fence), pending_head);
         (*fence).timestamp_union.timestamp = timestamp.unwrap_or_else(ktime_get);
         flag_word(fence).fetch_or(
@@ -785,7 +780,16 @@ pub unsafe extern "C" fn dma_fence_add_callback(
     }
     // SAFETY: the fence is live per the contract; the guard releases the lock.
     let _guard = unsafe { FenceLockGuard::acquire(fence) };
-    // SAFETY: the fence is live and its lock is held.
+    // Callback registration is itself a request for driver/composite
+    // signaling (Linux __dma_fence_enable_signaling). Merely linking the
+    // node can leave a poller asleep with no producer armed to notify it.
+    // SAFETY: The caller owns writable, unlinked callback storage and the
+    // live fence lock is held through arming and list publication.
+    unsafe {
+        init_list_head(ptr::addr_of_mut!((*callback).node));
+        arm_signaling_locked(fence);
+    }
+    // SAFETY: Arming can synchronously complete the fence under this lock.
     if unsafe { is_done_flag(fence) } {
         return -ENOENT;
     }
@@ -794,26 +798,28 @@ pub unsafe extern "C" fn dma_fence_add_callback(
     unsafe {
         (*callback).func = Some(function);
         let node = ptr::addr_of_mut!((*callback).node);
-        INIT_LIST_HEAD(node);
+        init_list_head(node);
         list_add_tail(node, callback_list(fence));
     }
     0
 }
 
-/// Block until a fence signals. Always returns 0 once the call returns.
+/// Block until a fence signals, or return `-ERESTARTSYS` if an interruptible
+/// wait observes a pending task signal. Uninterruptible waits ignore signals.
 ///
 /// # Safety
 /// `fence` must be null or point to a live initialized fence, and the caller
 /// must hold a reference throughout the wait. The caller must be in a context
 /// allowed to block and must not hold the fence spinlock.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn dma_fence_wait(fence: *mut DmaFence, _intr: bool) -> c_int {
+pub unsafe extern "C" fn dma_fence_wait(fence: *mut DmaFence, intr: bool) -> c_int {
     if fence.is_null() {
         return -EINVAL;
     }
-    let predicate = || unsafe { dma_fence_is_signaled(fence) };
-    let _ = wait_until_ready(None, &predicate);
-    0
+    // SAFETY: The caller retains the fence and may sleep; this uses the same
+    // signal predicate and native scheduler wake path as finite waits.
+    let result = unsafe { dma_fence_wait_timeout(fence, intr, MAX_SCHEDULE_TIMEOUT as c_long) };
+    if result < 0 { result as c_int } else { 0 }
 }
 
 /// Driver name of a fence, or a stable fallback when it has none.
@@ -1064,5 +1070,74 @@ mod tests {
         // Once the flag is set the driver hook is no longer consulted.
         assert!(unsafe { dma_fence_is_signaled(&mut fence) });
         assert_eq!(PROBE_CALLS.load(Ordering::Relaxed), 2);
+    }
+    #[test]
+    fn callback_registration_requests_driver_completion_and_handles_already_done() {
+        use core::sync::atomic::AtomicBool;
+
+        #[repr(C)]
+        struct Probe {
+            base: DmaFence,
+            pending: AtomicBool,
+            requests: AtomicUsize,
+            callbacks: AtomicUsize,
+        }
+        unsafe extern "C" fn enable(fence: *mut DmaFence) -> bool {
+            // SAFETY: This ops table belongs only to the live Probe whose
+            // first field is the base fence and whose storage outlives it.
+            let probe = unsafe { &*fence.cast::<Probe>() };
+            probe.requests.fetch_add(1, Ordering::Relaxed);
+            probe.pending.load(Ordering::Acquire)
+        }
+        unsafe extern "C" fn completed(fence: *mut DmaFence, _: *mut DmaFenceCb) {
+            // SAFETY: The callback receives the Probe's retained base fence.
+            unsafe { &*fence.cast::<Probe>() }
+                .callbacks
+                .fetch_add(1, Ordering::Release);
+        }
+        static OPS: DmaFenceOps = DmaFenceOps {
+            get_driver_name: None,
+            get_timeline_name: None,
+            enable_signaling: Some(enable),
+            signaled: None,
+            wait: None,
+            release: None,
+            set_deadline: None,
+        };
+        for pending in [true, false] {
+            // SAFETY: dma_fence_init initializes the zero-valid base before use.
+            let mut probe = Probe {
+                base: unsafe { core::mem::zeroed() },
+                pending: AtomicBool::new(pending),
+                requests: AtomicUsize::new(0),
+                callbacks: AtomicUsize::new(0),
+            };
+            // SAFETY: Local callback storage remains pinned until removal.
+            let mut callback: DmaFenceCb = unsafe { core::mem::zeroed() };
+            // SAFETY: Probe, callback and the immutable ops table remain live
+            // throughout registration, simulated hardware completion and removal.
+            let (result, requested, signaled, calls) = unsafe {
+                dma_fence_init(&mut probe.base, &OPS, ptr::null_mut(), 1, 1);
+                let result = dma_fence_add_callback(&mut probe.base, &mut callback, completed);
+                let requested = probe.requests.load(Ordering::Acquire);
+                // The device produces an IRQ only after the callback consumer
+                // requested signaling. The fence/callback logic remains real.
+                if pending && requested != 0 {
+                    probe.pending.store(false, Ordering::Release);
+                    dma_fence_signal(&mut probe.base);
+                }
+                let signaled = dma_fence_is_signaled(&mut probe.base);
+                let calls = probe.callbacks.load(Ordering::Acquire);
+                dma_fence_remove_callback(&mut probe.base, &mut callback);
+                (result, requested, signaled, calls)
+            };
+            assert_eq!(
+                requested, 1,
+                "callback registration must arm driver signaling"
+            );
+            assert!(signaled);
+            assert_eq!(result, if pending { 0 } else { -ENOENT });
+            assert_eq!(calls, usize::from(pending));
+        }
     }
 }

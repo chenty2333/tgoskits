@@ -2,8 +2,6 @@
 // Copyright 2026 TheKernel contributors. See ../LICENSE-MIT.
 //! Port of Linux `drivers/gpu/drm/drm_probe_helper.c`.
 
-#![allow(non_snake_case, non_upper_case_globals)]
-
 use core::{
     mem::offset_of,
     sync::atomic::{AtomicBool, Ordering},
@@ -14,7 +12,7 @@ use drm_kapi::mutex::{mutex_lock, mutex_trylock, mutex_unlock};
 use drm_kapi::{
     config::EDEADLK,
     types::{DelayedWork, WorkStruct},
-    workqueue::{INIT_DELAYED_WORK, cancel_delayed_work_sync, mod_delayed_work, system_dfl_wq},
+    workqueue::{SYSTEM_DFL_WQ, cancel_delayed_work_sync, init_delayed_work, mod_delayed_work},
 };
 #[cfg(test)]
 /// # Safety
@@ -54,7 +52,7 @@ use crate::{
     },
     drm_modeset_lock_types::DrmModesetAcquireCtx,
     uapi_drm_consts::{
-        DRM_MODE_CONNECTOR_DisplayPort, DRM_MODE_FLAG_3D_MASK, DRM_MODE_FLAG_DBLSCAN,
+        DRM_MODE_CONNECTOR_DISPLAYPORT, DRM_MODE_FLAG_3D_MASK, DRM_MODE_FLAG_DBLSCAN,
         DRM_MODE_FLAG_INTERLACE, DRM_MODE_TYPE_PREFERRED, DRM_MODE_TYPE_USERDEF,
     },
 };
@@ -656,7 +654,7 @@ pub unsafe extern "C" fn drm_helper_probe_single_connector_modes(
                 (*dev).mode_config.delayed_event = true;
                 if (*dev).mode_config.poll_enabled {
                     mod_delayed_work(
-                        system_dfl_wq,
+                        SYSTEM_DFL_WQ,
                         core::ptr::addr_of_mut!((*dev).mode_config.output_poll_work),
                         0,
                     );
@@ -694,7 +692,7 @@ pub unsafe extern "C" fn drm_helper_probe_single_connector_modes(
             // SAFETY: `connector` is valid and live per caller preconditions.
             count = unsafe { crate::drm_edid_upstream::drm_add_modes_noedid(connector, 1024, 768) };
             // SAFETY: `connector` is valid and live, so reading `connector_type` is sound.
-            if unsafe { (*connector).connector_type as u32 == DRM_MODE_CONNECTOR_DisplayPort } {
+            if unsafe { (*connector).connector_type as u32 == DRM_MODE_CONNECTOR_DISPLAYPORT } {
                 // SAFETY: `connector` is valid and live.
                 unsafe { crate::drm_modes_upstream::drm_set_preferred_mode(connector, 640, 480) };
             }
@@ -722,7 +720,7 @@ pub unsafe extern "C" fn drm_helper_probe_single_connector_modes(
         // SAFETY: `connector` is valid and live, so accessing `modes` is sound.
         if unsafe { drm_kapi::list::list_empty(&(*connector).modes) }
             // SAFETY: `connector` is valid and live, so reading `connector_type` is sound.
-            && unsafe { (*connector).connector_type as u32 == DRM_MODE_CONNECTOR_DisplayPort }
+            && unsafe { (*connector).connector_type as u32 == DRM_MODE_CONNECTOR_DISPLAYPORT }
         {
             // SAFETY: `connector` is valid and live.
             count = unsafe { crate::drm_edid_upstream::drm_add_modes_noedid(connector, 640, 480) };
@@ -839,7 +837,7 @@ unsafe fn drm_kms_helper_enable_hpd(dev: *mut DrmDevice) -> bool {
 /// `dev` must be a valid, live pointer to `DrmDevice` with initialized `output_poll_work`.
 unsafe fn reschedule_output_poll_work(dev: *mut DrmDevice) {
     // SAFETY: `dev` is valid and live per caller preconditions. `output_poll_work` is an
-    // initialized delayed work item in `dev->mode_config`, and `system_dfl_wq` is a live workqueue.
+    // initialized delayed work item in `dev->mode_config`, and `SYSTEM_DFL_WQ` is a live workqueue.
     unsafe {
         let delay = if (*dev).mode_config.delayed_event {
             drm_kapi::config::HZ as u64
@@ -847,7 +845,7 @@ unsafe fn reschedule_output_poll_work(dev: *mut DrmDevice) {
             DRM_OUTPUT_POLL_PERIOD
         };
         mod_delayed_work(
-            system_dfl_wq,
+            SYSTEM_DFL_WQ,
             core::ptr::addr_of_mut!((*dev).mode_config.output_poll_work),
             delay,
         );
@@ -1071,9 +1069,9 @@ pub unsafe extern "C" fn drm_kms_helper_poll_init(dev: *mut DrmDevice) {
         return;
     }
     // SAFETY: `dev` is verified non-null and points to a live `DrmDevice` per caller preconditions.
-    // `INIT_DELAYED_WORK` initializes the embedded `output_poll_work` in `dev->mode_config`.
+    // `init_delayed_work` initializes the embedded `output_poll_work` in `dev->mode_config`.
     unsafe {
-        INIT_DELAYED_WORK(
+        init_delayed_work(
             &mut (*dev).mode_config.output_poll_work,
             output_poll_work_callback,
         );

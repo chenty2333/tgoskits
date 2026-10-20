@@ -6,7 +6,6 @@
 // and CONFIG_FB_DEFERRED_IO are enabled; CONFIG_FB_BACKLIGHT and
 // CONFIG_FB_TILEBLITTING are disabled in the selected reference configuration.
 //! Linux fbdev core types.
-#![allow(non_camel_case_types, non_upper_case_globals, non_snake_case)]
 
 use core::{
     ffi::{c_char, c_int, c_long, c_ulong, c_void},

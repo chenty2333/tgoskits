@@ -64,6 +64,10 @@ flowchart TD
 Linux 对照实现的内部函数和类型名称保留，便于维护算法与错误路径；系统服务通过显式
 provider 接入，不依靠驱动探测顺带初始化。
 
+共享文件的 client-capability 标志使用原子布尔量；这些值只是独立的查询偏好，不承担
+其他对象的发布。master 指针的检查仍在设备的 `master_mutex` 下完成。`ProviderSlot<T>`
+只接受 `Sync + 'static` 的不可变服务表，发布后的表不能被另一内核服务替换。
+
 ### 2.1 内核服务
 
 `drm-kapi` 的锁、等待、时间、任务工作、分配和页服务由运行时实现；凭据、用户内存、
@@ -114,6 +118,18 @@ backing 的映射租约。租约随 VMA 克隆或拆分保留，最后一次映�
 DMA-BUF 引用直到设备释放 backing。Direct 域以外的导入不能沿用仅保留文件的策略，必须
 同时保留完整 DMA 映射和 attachment，所以当前适配器在该能力边界拒绝导入。
 
+VirtGPU 上下文按“文件、对象”持有一个附着引用，另行计数该文件中的 handle。关闭最后
+一个本地 handle 时，在 GPU 所有者锁下解除附着，然后释放该引用；其他文件、VMA、
+PRIME 和在途提交的引用不受影响。附着失败或解除附着失败不能提前释放设备仍可能访问
+的对象，最终文件关闭须先确认上下文销毁或设备停止，再清理保留项。
+
+Venus 的 host-visible blob 映射由 GEM 对象持有 BAR 区间租约。区间分配遵守设备对齐及
+原路径的 16 KiB 下限；最后一个对象/VMA 引用释放后，先 UNMAP、再确认资源释放，最后
+归还 BAR 区间。host-only blob 不占用 guest DMA backing 的分配预算；mappable blob 的
+大小由实际 BAR 范围约束，不能额外套用 guest backing 的 256 MiB 上限。映射失败也先
+解除设备资源，再归还可能被迟到 MAP 使用的区间。同设备
+PRIME 复用原对象及租约；host-only BAR 不能被伪造成 guest 页的 SG 表导出到其他设备。
+
 ### 3.2 提交与完成
 
 `TEST_ONLY` 只验证状态，不改 scanout、不发布事件，也不消耗正式提交的完成令牌。
@@ -141,6 +157,11 @@ GPU 完成通知可能在设备运行时锁内触发。该通知只能发布待�
 重入 `ax-gpu`，也不直接运行可能取得 DRM 锁的任意 fence 回调。任务上下文取得完成快照，
 释放设备锁后更新公共 fence 和事件状态；等待方先登记再复查，避免丢失唤醒。
 
+RDIF 命令完成和显示完成不是同一个边界。前者解除旧资源的设备访问引用，随后将活动
+CRTC 的事件交给下一次 vblank；out-fence 与翻页事件在同一序号和时间戳上完成。停用
+CRTC 或没有 vblank 的设备才走立即完成路径。输入 fence 则使用实际信号策略：可中断
+等待遇到待处理信号返回 `-ERESTARTSYS`，不可中断等待仍须等到 fence 完成。
+
 ## 4. 替换与兼容
 
 本地实现完成后，Starry 的 DRM open、ioctl、read、poll 和 mmap 都经过公共核心。删除
@@ -154,6 +175,13 @@ GPU 完成通知可能在设备运行时锁内触发。该通知只能发布待�
 Linux 对照基线为 7.2.3 中的 DRM ioctl、GEM、PRIME、atomic、syncobj 和 dma-fence 实现。
 已有 2D 和 virgl 用户态 ABI 不应因重构退化。能力位只公布后端实际实现的路径；公共
 syncobj 不以 Venus 是否存在为启用条件。没有 GPU 时仍不发布虚假的 DRM 节点。
+
+同步包含 Venus 的 dev 后，context-init、最多 64 个 ring、poll-ring mask、按 ring 提交
+和 host-visible blob 均迁到 `ax-drm::backend`，不保留旧 `card0/virtgpu` 并行实现。
+capset 以版本 0 探测，包括 Venus；`HOST_VISIBLE` 只在 blob/context 能力与实际 BAR
+区域均存在时报告。未启用这些设备能力的经典 VirGL 路径仍可使用，不要求所有主机都
+支持 Venus。`apps/starry/venus-regression` 是有界的真实 Vulkan 提交与回读应用，使用
+显式 `virgl` 主机能力，不能由节点存在或 GETPARAM 成功替代它的运行结果。
 
 本次不改变磁盘格式或外部持久配置。若需回退，回退这组代码提交即可；不在运行时遇到
 错误后静默重试旧 DRM 实现。

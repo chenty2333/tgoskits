@@ -15,8 +15,6 @@
 //! Deviation: the debugfs hooks (`drm_debugfs_encoder_add/remove`) are
 //! omitted; they are dead with `CONFIG_DEBUG_FS` off on this target.
 
-#![allow(non_snake_case)]
-
 use core::{
     ffi::{c_char, c_void},
     mem::{offset_of, size_of},
@@ -25,7 +23,7 @@ use core::{
 use drm_kapi::{
     assert::warn_on,
     config::{EINVAL, ENOENT, ENOMEM, EOPNOTSUPP, GFP_KERNEL},
-    list::{INIT_LIST_HEAD, list_add_tail, list_del},
+    list::{init_list_head, list_add_tail, list_del},
     memory::{kfree, kmalloc},
     mutex::{mutex_destroy, mutex_init},
     types::ListHead,
@@ -337,7 +335,7 @@ unsafe fn __drm_encoder_init(
             return ret;
         }
 
-        INIT_LIST_HEAD(core::ptr::addr_of_mut!((*encoder).bridge_chain));
+        init_list_head(core::ptr::addr_of_mut!((*encoder).bridge_chain));
         mutex_init(core::ptr::addr_of_mut!((*encoder).bridge_chain_mutex));
         list_add_tail(
             core::ptr::addr_of_mut!((*encoder).head),
@@ -502,14 +500,14 @@ pub unsafe extern "C" fn __drmm_encoder_alloc(
     unsafe {
         let container = drmm_kmalloc(dev, size, GFP_KERNEL | 0x100 /* __GFP_ZERO */);
         if container.is_null() {
-            return drm_kapi::config::ERR_PTR::<c_void>(-ENOMEM);
+            return drm_kapi::config::err_ptr::<c_void>(-ENOMEM);
         }
 
         let encoder = container.cast::<u8>().add(offset).cast::<DrmEncoder>();
 
         let ret = __drmm_encoder_init(dev, encoder, funcs, encoder_type, name);
         if ret != 0 {
-            return drm_kapi::config::ERR_PTR::<c_void>(ret);
+            return drm_kapi::config::err_ptr::<c_void>(ret);
         }
 
         container

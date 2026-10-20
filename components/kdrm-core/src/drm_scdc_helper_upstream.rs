@@ -6,8 +6,6 @@
 //! reading/writing SCDC registers, enabling/disabling scrambling, setting
 //! the TMDS 1/40 vs 1/10 bit clock ratio, and reading scrambling status.
 
-#![allow(non_snake_case)]
-
 use core::ffi::c_void;
 
 use drm_kapi::{

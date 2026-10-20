@@ -11,7 +11,7 @@ use core::ffi::c_char;
 
 use drm_kapi::{
     assert::warn_on,
-    config::{EINVAL, ENOMEM, IS_ERR, PTR_ERR},
+    config::{EINVAL, ENOMEM, is_err, ptr_err},
     print::{DrmLogLevel, drm_log_at},
 };
 
@@ -371,8 +371,8 @@ unsafe fn drm_atomic_helper_crtc_normalize_zpos(
         }
         // SAFETY: `state` is a valid atomic commit and `plane` is a live plane on the device.
         let plane_state = unsafe { drm_atomic_get_plane_state(state, plane) };
-        if IS_ERR(plane_state) {
-            ret = PTR_ERR(plane_state);
+        if is_err(plane_state) {
+            ret = ptr_err(plane_state);
             break 'planes;
         }
         // SAFETY: `states` has capacity for `total_planes` entries and `n < total_planes`.

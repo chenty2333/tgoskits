@@ -18,7 +18,7 @@ use core::{
 };
 
 use crate::{
-    config::IS_ERR,
+    config::is_err,
     dma_fence::{
         dma_fence_add_callback, dma_fence_driver_name, dma_fence_get, dma_fence_get_status,
         dma_fence_is_signaled, dma_fence_put, dma_fence_remove_callback, dma_fence_set_deadline,
@@ -28,7 +28,7 @@ use crate::{
         DmaFenceUnwrap, dma_fence_unwrap_first, dma_fence_unwrap_merge, dma_fence_unwrap_next,
     },
     kernel_services::{anon_inode_getfile, fd_install, fget, get_unused_fd_flags, put_unused_fd},
-    list::{INIT_LIST_HEAD, list_empty},
+    list::{init_list_head, list_empty},
     memory::{kfree, kzalloc_obj},
     mm_native::{copy_from_user, copy_to_user},
     shmem::{File, FileOperations, Inode, fput_file},
@@ -187,7 +187,7 @@ unsafe fn allocate_sync_file() -> *mut SyncFile {
             0,
         )
     };
-    if IS_ERR(file) {
+    if is_err(file) {
         // SAFETY: nothing else references the allocation yet.
         unsafe { kfree(sync_file) };
         return ptr::null_mut();
@@ -196,7 +196,7 @@ unsafe fn allocate_sync_file() -> *mut SyncFile {
     unsafe {
         (*sync_file).file = file.cast();
         init_waitqueue_head(&mut (*sync_file).wq);
-        INIT_LIST_HEAD(ptr::addr_of_mut!((*sync_file).cb.node));
+        init_list_head(ptr::addr_of_mut!((*sync_file).cb.node));
     }
     sync_file
 }

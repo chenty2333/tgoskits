@@ -19,8 +19,6 @@
 //! - `memcpy_toio()` is a plain copy; the MMIO barriers are not modelled.
 //! - `ARCH_KMALLOC_MINALIGN` is 8 on x86_64 and is used as a constant.
 
-#![allow(non_snake_case)]
-
 use core::{ffi::c_void, ptr};
 
 use drm_kapi::{
@@ -273,11 +271,20 @@ pub unsafe extern "C" fn drm_fb_clip_offset(
 /// - If `vaddr_cached_hint` is false, `state` must point to a valid `DrmFormatConvState` to reserve line scratch memory.
 /// - `xfrm_line` must be a valid pixel transformation function matching the input and output formats.
 // Keeps the Linux function signature.
-#[allow(clippy::too_many_arguments)]
-unsafe fn __drm_fb_xfrm(
+struct LineDestination {
     dst: *mut c_void,
     dst_pitch: usize,
     dst_pixsize: usize,
+}
+
+struct MappedDestination {
+    dst: *mut IosysMap,
+    dst_pitch: *const u32,
+    dst_pixsize: *const u8,
+}
+
+unsafe fn __drm_fb_xfrm(
+    destination: LineDestination,
     vaddr: *const c_void,
     fb: *const DrmFramebuffer,
     clip: *const DrmRect,
@@ -285,6 +292,11 @@ unsafe fn __drm_fb_xfrm(
     state: *mut DrmFormatConvState,
     xfrm_line: XfrmLine,
 ) -> i32 {
+    let LineDestination {
+        dst,
+        dst_pitch,
+        dst_pixsize,
+    } = destination;
     // SAFETY: `clip` is a valid, aligned pointer to `DrmRect`; borrowing as shared reference to read dimensions.
     let clip = unsafe { &*clip };
     let linepixels = drm_rect_width(clip) as usize;
@@ -353,11 +365,8 @@ unsafe fn __drm_fb_xfrm(
 /// - `state` must point to a valid `DrmFormatConvState` to reserve bounce buffer memory.
 /// - `xfrm_line` must be a valid pixel transformation function matching the input and output formats.
 // Keeps the Linux function signature.
-#[allow(clippy::too_many_arguments)]
 unsafe fn __drm_fb_xfrm_toio(
-    dst: *mut c_void,
-    dst_pitch: usize,
-    dst_pixsize: usize,
+    destination: LineDestination,
     vaddr: *const c_void,
     fb: *const DrmFramebuffer,
     clip: *const DrmRect,
@@ -365,6 +374,11 @@ unsafe fn __drm_fb_xfrm_toio(
     state: *mut DrmFormatConvState,
     xfrm_line: XfrmLine,
 ) -> i32 {
+    let LineDestination {
+        dst,
+        dst_pitch,
+        dst_pixsize,
+    } = destination;
     // SAFETY: `clip` is a valid, aligned pointer to `DrmRect`; borrowing as shared reference to read dimensions.
     let clip = unsafe { &*clip };
     let linepixels = drm_rect_width(clip) as usize;
@@ -446,11 +460,8 @@ unsafe fn __drm_fb_xfrm_toio(
 /// - `state` must point to an initialized `DrmFormatConvState`.
 /// - `xfrm_line` must be a valid row-transformation function pointer.
 // Keeps the Linux function signature.
-#[allow(clippy::too_many_arguments)]
 unsafe fn drm_fb_xfrm(
-    dst: *mut IosysMap,
-    dst_pitch: *const u32,
-    dst_pixsize: *const u8,
+    destination: MappedDestination,
     src: *const IosysMap,
     fb: *const DrmFramebuffer,
     clip: *const DrmRect,
@@ -458,6 +469,11 @@ unsafe fn drm_fb_xfrm(
     state: *mut DrmFormatConvState,
     xfrm_line: XfrmLine,
 ) -> i32 {
+    let MappedDestination {
+        dst,
+        dst_pitch,
+        dst_pixsize,
+    } = destination;
     // default_dst_pitch[] is all zero: a NULL pitch means "tight packing".
     let pitch0 = if dst_pitch.is_null() {
         0
@@ -475,9 +491,11 @@ unsafe fn drm_fb_xfrm(
         // system-memory scanout data; `fb`, `clip`, and `state` are valid pointers.
         unsafe {
             __drm_fb_xfrm_toio(
-                (*dst)._anon_0.vaddr_iomem,
-                pitch0,
-                pixsize0,
+                LineDestination {
+                    dst: (*dst)._anon_0.vaddr_iomem,
+                    dst_pitch: pitch0,
+                    dst_pixsize: pixsize0,
+                },
                 (*src)._anon_0.vaddr,
                 fb,
                 clip,
@@ -491,9 +509,11 @@ unsafe fn drm_fb_xfrm(
         // system-memory scanout data; `fb`, `clip`, and `state` are valid pointers.
         unsafe {
             __drm_fb_xfrm(
-                (*dst)._anon_0.vaddr,
-                pitch0,
-                pixsize0,
+                LineDestination {
+                    dst: (*dst)._anon_0.vaddr,
+                    dst_pitch: pitch0,
+                    dst_pixsize: pixsize0,
+                },
                 (*src)._anon_0.vaddr,
                 fb,
                 clip,
@@ -837,9 +857,11 @@ pub unsafe extern "C" fn drm_fb_xrgb8888_to_rgb332(
     // and `state` are valid pointers forwarded to `drm_fb_xfrm` with `drm_fb_xrgb8888_to_rgb332_line`.
     unsafe {
         drm_fb_xfrm(
-            dst,
-            dst_pitch,
-            DST_PIXSIZE.as_ptr(),
+            MappedDestination {
+                dst,
+                dst_pitch,
+                dst_pixsize: DST_PIXSIZE.as_ptr(),
+            },
             src,
             fb,
             clip,
@@ -888,9 +910,11 @@ pub unsafe extern "C" fn drm_fb_xrgb8888_to_rgb565(
     // and `state` are valid pointers forwarded to `drm_fb_xfrm` with `drm_fb_xrgb8888_to_rgb565_line`.
     unsafe {
         drm_fb_xfrm(
-            dst,
-            dst_pitch,
-            DST_PIXSIZE.as_ptr(),
+            MappedDestination {
+                dst,
+                dst_pitch,
+                dst_pixsize: DST_PIXSIZE.as_ptr(),
+            },
             src,
             fb,
             clip,
@@ -939,9 +963,11 @@ pub unsafe extern "C" fn drm_fb_xrgb8888_to_rgb565be(
     // and `state` are valid pointers forwarded to `drm_fb_xfrm` with `drm_fb_xrgb8888_to_rgb565be_line`.
     unsafe {
         drm_fb_xfrm(
-            dst,
-            dst_pitch,
-            DST_PIXSIZE.as_ptr(),
+            MappedDestination {
+                dst,
+                dst_pitch,
+                dst_pixsize: DST_PIXSIZE.as_ptr(),
+            },
             src,
             fb,
             clip,
@@ -990,9 +1016,11 @@ pub unsafe extern "C" fn drm_fb_xrgb8888_to_xrgb1555(
     // and `state` are valid pointers forwarded to `drm_fb_xfrm` with `drm_fb_xrgb8888_to_xrgb1555_line`.
     unsafe {
         drm_fb_xfrm(
-            dst,
-            dst_pitch,
-            DST_PIXSIZE.as_ptr(),
+            MappedDestination {
+                dst,
+                dst_pitch,
+                dst_pixsize: DST_PIXSIZE.as_ptr(),
+            },
             src,
             fb,
             clip,
@@ -1041,9 +1069,11 @@ pub unsafe extern "C" fn drm_fb_xrgb8888_to_argb1555(
     // and `state` are valid pointers forwarded to `drm_fb_xfrm` with `drm_fb_xrgb8888_to_argb1555_line`.
     unsafe {
         drm_fb_xfrm(
-            dst,
-            dst_pitch,
-            DST_PIXSIZE.as_ptr(),
+            MappedDestination {
+                dst,
+                dst_pitch,
+                dst_pixsize: DST_PIXSIZE.as_ptr(),
+            },
             src,
             fb,
             clip,
@@ -1092,9 +1122,11 @@ pub unsafe extern "C" fn drm_fb_xrgb8888_to_rgba5551(
     // and `state` are valid pointers forwarded to `drm_fb_xfrm` with `drm_fb_xrgb8888_to_rgba5551_line`.
     unsafe {
         drm_fb_xfrm(
-            dst,
-            dst_pitch,
-            DST_PIXSIZE.as_ptr(),
+            MappedDestination {
+                dst,
+                dst_pitch,
+                dst_pixsize: DST_PIXSIZE.as_ptr(),
+            },
             src,
             fb,
             clip,
@@ -1143,9 +1175,11 @@ pub unsafe extern "C" fn drm_fb_xrgb8888_to_rgb888(
     // and `state` are valid pointers forwarded to `drm_fb_xfrm` with `drm_fb_xrgb8888_to_rgb888_line`.
     unsafe {
         drm_fb_xfrm(
-            dst,
-            dst_pitch,
-            DST_PIXSIZE.as_ptr(),
+            MappedDestination {
+                dst,
+                dst_pitch,
+                dst_pixsize: DST_PIXSIZE.as_ptr(),
+            },
             src,
             fb,
             clip,
@@ -1194,9 +1228,11 @@ pub unsafe extern "C" fn drm_fb_xrgb8888_to_bgr888(
     // and `state` are valid pointers forwarded to `drm_fb_xfrm` with `drm_fb_xrgb8888_to_bgr888_line`.
     unsafe {
         drm_fb_xfrm(
-            dst,
-            dst_pitch,
-            DST_PIXSIZE.as_ptr(),
+            MappedDestination {
+                dst,
+                dst_pitch,
+                dst_pixsize: DST_PIXSIZE.as_ptr(),
+            },
             src,
             fb,
             clip,
@@ -1245,9 +1281,11 @@ pub unsafe extern "C" fn drm_fb_xrgb8888_to_argb8888(
     // and `state` are valid pointers forwarded to `drm_fb_xfrm` with `drm_fb_xrgb8888_to_argb8888_line`.
     unsafe {
         drm_fb_xfrm(
-            dst,
-            dst_pitch,
-            DST_PIXSIZE.as_ptr(),
+            MappedDestination {
+                dst,
+                dst_pitch,
+                dst_pixsize: DST_PIXSIZE.as_ptr(),
+            },
             src,
             fb,
             clip,
@@ -1296,9 +1334,11 @@ pub unsafe extern "C" fn drm_fb_xrgb8888_to_abgr8888(
     // and `state` are valid pointers forwarded to `drm_fb_xfrm` with `drm_fb_xrgb8888_to_abgr8888_line`.
     unsafe {
         drm_fb_xfrm(
-            dst,
-            dst_pitch,
-            DST_PIXSIZE.as_ptr(),
+            MappedDestination {
+                dst,
+                dst_pitch,
+                dst_pixsize: DST_PIXSIZE.as_ptr(),
+            },
             src,
             fb,
             clip,
@@ -1347,9 +1387,11 @@ pub unsafe extern "C" fn drm_fb_xrgb8888_to_xbgr8888(
     // and `state` are valid pointers forwarded to `drm_fb_xfrm` with `drm_fb_xrgb8888_to_xbgr8888_line`.
     unsafe {
         drm_fb_xfrm(
-            dst,
-            dst_pitch,
-            DST_PIXSIZE.as_ptr(),
+            MappedDestination {
+                dst,
+                dst_pitch,
+                dst_pixsize: DST_PIXSIZE.as_ptr(),
+            },
             src,
             fb,
             clip,
@@ -1398,9 +1440,11 @@ pub unsafe extern "C" fn drm_fb_xrgb8888_to_bgrx8888(
     // and `state` are valid pointers forwarded to `drm_fb_xfrm` with `drm_fb_xrgb8888_to_bgrx8888_line`.
     unsafe {
         drm_fb_xfrm(
-            dst,
-            dst_pitch,
-            DST_PIXSIZE.as_ptr(),
+            MappedDestination {
+                dst,
+                dst_pitch,
+                dst_pixsize: DST_PIXSIZE.as_ptr(),
+            },
             src,
             fb,
             clip,
@@ -1449,9 +1493,11 @@ pub unsafe extern "C" fn drm_fb_xrgb8888_to_xrgb2101010(
     // and `state` are valid pointers forwarded to `drm_fb_xfrm` with `drm_fb_xrgb8888_to_xrgb2101010_line`.
     unsafe {
         drm_fb_xfrm(
-            dst,
-            dst_pitch,
-            DST_PIXSIZE.as_ptr(),
+            MappedDestination {
+                dst,
+                dst_pitch,
+                dst_pixsize: DST_PIXSIZE.as_ptr(),
+            },
             src,
             fb,
             clip,
@@ -1500,9 +1546,11 @@ pub unsafe extern "C" fn drm_fb_xrgb8888_to_argb2101010(
     // and `state` are valid pointers forwarded to `drm_fb_xfrm` with `drm_fb_xrgb8888_to_argb2101010_line`.
     unsafe {
         drm_fb_xfrm(
-            dst,
-            dst_pitch,
-            DST_PIXSIZE.as_ptr(),
+            MappedDestination {
+                dst,
+                dst_pitch,
+                dst_pixsize: DST_PIXSIZE.as_ptr(),
+            },
             src,
             fb,
             clip,

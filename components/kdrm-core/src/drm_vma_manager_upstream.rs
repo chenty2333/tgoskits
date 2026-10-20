@@ -6,8 +6,6 @@
 //! Uses `drm_mm` to allocate page-aligned offsets and an rb-tree of
 //! `drm_vma_offset_file` entries keyed by the file pointer to track mapping permissions.
 
-#![allow(non_snake_case)]
-
 use alloc::boxed::Box;
 use core::ffi::{c_int, c_ulong};
 

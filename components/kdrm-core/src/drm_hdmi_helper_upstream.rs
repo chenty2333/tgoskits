@@ -6,8 +6,6 @@
 //! colorimetry/bars/content type calculation, TMDS character rate computation,
 //! and Audio Clock Regeneration (ACR) N and CTS lookup/calculation.
 
-#![allow(non_snake_case)]
-
 use core::ffi::c_void;
 
 use drm_kapi::{config::EINVAL, primitives::div_round_closest_ull};
@@ -123,27 +121,27 @@ const FULL_COLORIMETRY_MASK: u32 = 0x1ff;
 const NORMAL_COLORIMETRY_MASK: u32 = 0x3;
 const EXTENDED_COLORIMETRY_MASK: u32 = 0x7;
 
-const fn C(x: u32) -> u32 {
+const fn c(x: u32) -> u32 {
     x
 }
-const fn EC(x: u32) -> u32 {
+const fn ec(x: u32) -> u32 {
     x << 2
 }
-const fn ACE(x: u32) -> u32 {
+const fn ace(x: u32) -> u32 {
     x << 5
 }
 
 const HDMI_COLORIMETRY_NO_DATA: u32 = 0x0;
-const HDMI_COLORIMETRY_SMPTE_170M_YCC: u32 = C(1) | EC(0) | ACE(0);
-const HDMI_COLORIMETRY_BT709_YCC: u32 = C(2) | EC(0) | ACE(0);
-const HDMI_COLORIMETRY_XVYCC_601: u32 = C(3) | EC(0) | ACE(0);
-const HDMI_COLORIMETRY_XVYCC_709: u32 = C(3) | EC(1) | ACE(0);
-const HDMI_COLORIMETRY_SYCC_601: u32 = C(3) | EC(2) | ACE(0);
-const HDMI_COLORIMETRY_OPYCC_601: u32 = C(3) | EC(3) | ACE(0);
-const HDMI_COLORIMETRY_OPRGB: u32 = C(3) | EC(4) | ACE(0);
-const HDMI_COLORIMETRY_BT2020_CYCC: u32 = C(3) | EC(5) | ACE(0);
-const HDMI_COLORIMETRY_BT2020_RGB: u32 = C(3) | EC(6) | ACE(0);
-const HDMI_COLORIMETRY_BT2020_YCC: u32 = C(3) | EC(6) | ACE(0);
+const HDMI_COLORIMETRY_SMPTE_170M_YCC: u32 = c(1) | ec(0) | ace(0);
+const HDMI_COLORIMETRY_BT709_YCC: u32 = c(2) | ec(0) | ace(0);
+const HDMI_COLORIMETRY_XVYCC_601: u32 = c(3) | ec(0) | ace(0);
+const HDMI_COLORIMETRY_XVYCC_709: u32 = c(3) | ec(1) | ace(0);
+const HDMI_COLORIMETRY_SYCC_601: u32 = c(3) | ec(2) | ace(0);
+const HDMI_COLORIMETRY_OPYCC_601: u32 = c(3) | ec(3) | ace(0);
+const HDMI_COLORIMETRY_OPRGB: u32 = c(3) | ec(4) | ace(0);
+const HDMI_COLORIMETRY_BT2020_CYCC: u32 = c(3) | ec(5) | ace(0);
+const HDMI_COLORIMETRY_BT2020_RGB: u32 = c(3) | ec(6) | ace(0);
+const HDMI_COLORIMETRY_BT2020_YCC: u32 = c(3) | ec(6) | ace(0);
 
 const HDMI_COLORIMETRY_VAL: [u32; 11] = [
     HDMI_COLORIMETRY_NO_DATA,        // DRM_MODE_COLORIMETRY_NO_DATA (0)

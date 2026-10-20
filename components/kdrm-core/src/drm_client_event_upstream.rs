@@ -2,8 +2,6 @@
 // Copyright 2026 TheKernel contributors. See ../LICENSE-MIT.
 //! Port of Linux `drivers/gpu/drm/drm_client_event.c`.
 
-#![allow(non_snake_case, non_upper_case_globals)]
-
 use core::mem::offset_of;
 
 use drm_kapi::list::list_del;

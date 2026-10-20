@@ -7,8 +7,6 @@
 //! actual drm-kapi anonymous file, so fd lookup and object lifetime use the
 //! kernel's file table and file reference count rather than a parallel fd map.
 
-#![allow(non_snake_case)]
-
 use core::{
     ffi::{c_int, c_void},
     mem::size_of,
@@ -16,10 +14,10 @@ use core::{
 };
 
 use drm_kapi::{
-    config::{EINVAL, ENOMEM, EOPNOTSUPP, ERR_PTR, GFP_KERNEL, IS_ERR, PTR_ERR},
+    config::{EINVAL, ENOMEM, EOPNOTSUPP, GFP_KERNEL, err_ptr, is_err, ptr_err},
     dma_resv::{dma_resv_fini, dma_resv_init, dma_resv_wait_timeout},
     kernel_services::{anon_inode_getfile, fget},
-    list::{INIT_LIST_HEAD, list_add_tail, list_del_init, list_empty},
+    list::{init_list_head, list_add_tail, list_del_init, list_empty},
     locks::{spin_lock_init, spin_lock_raw, spin_unlock_raw},
     memory::{kfree, kmalloc},
     shmem::{File as ShmemFile, FileOperations, Inode, fput_file, get_file_file},
@@ -53,7 +51,7 @@ static DMA_BUF_FOPS: FileOperations = FileOperations {
 /// The caller must retain that reference for as long as it uses the returned
 /// DMA-BUF pointer; this helper does not acquire an additional reference.
 pub unsafe fn drm_dma_buf_from_file(file: *mut ShmemFile) -> Option<*mut DmaBuf> {
-    if file.is_null() || IS_ERR(file) {
+    if file.is_null() || is_err(file) {
         return None;
     }
 
@@ -65,7 +63,7 @@ pub unsafe fn drm_dma_buf_from_file(file: *mut ShmemFile) -> Option<*mut DmaBuf>
     }
 
     let dmabuf = file_ref._private_data.cast::<DmaBuf>();
-    if dmabuf.is_null() || IS_ERR(dmabuf) {
+    if dmabuf.is_null() || is_err(dmabuf) {
         return None;
     }
     // SAFETY: `file.f_op` matched `DMA_BUF_FOPS`, so `_private_data` points to the `DmaBuf`
@@ -82,16 +80,16 @@ pub unsafe fn drm_dma_buf_from_file(file: *mut ShmemFile) -> Option<*mut DmaBuf>
 /// Linux's inline `get_dma_buf()` helper.
 ///
 /// # Safety
-/// `dmabuf` must be null/ERR_PTR or a live DMA-BUF pointer whose backing file reference
+/// `dmabuf` must be null/err_ptr or a live DMA-BUF pointer whose backing file reference
 /// is retained by the caller.
 pub unsafe fn get_dma_buf(dmabuf: *mut DmaBuf) {
-    if dmabuf.is_null() || IS_ERR(dmabuf) {
+    if dmabuf.is_null() || is_err(dmabuf) {
         return;
     }
-    // SAFETY: `dmabuf` is verified non-null and not ERR_PTR; the caller holds an active
+    // SAFETY: `dmabuf` is verified non-null and not err_ptr; the caller holds an active
     // reference to the DMA-BUF, so `(*dmabuf).file` is valid and safely readable.
     let file = unsafe { (*dmabuf).file.cast::<ShmemFile>() };
-    if !file.is_null() && !IS_ERR(file) {
+    if !file.is_null() && !is_err(file) {
         // SAFETY: `file` was read from the live DMA-BUF; incrementing its reference count via get_file_file.
         unsafe { get_file_file(file) };
     }
@@ -145,19 +143,19 @@ unsafe extern "C" fn dma_buf_file_release(_inode: *mut Inode, file: *mut ShmemFi
 /// - `(*exp_info).exp_name`, if non-null, must point to a valid null-terminated C string.
 pub unsafe extern "C" fn dma_buf_export(exp_info: *const DmaBufExportInfo) -> *mut DmaBuf {
     if exp_info.is_null() {
-        return ERR_PTR(-EINVAL);
+        return err_ptr(-EINVAL);
     }
     // SAFETY: `exp_info` was checked non-null and properly aligned; it points to an initialized
     // `DmaBufExportInfo` value whose memory remains valid and unmodified for the duration of export.
     let info = unsafe { &*exp_info };
-    if info.ops.is_null() || IS_ERR(info.ops) {
-        return ERR_PTR(-EINVAL);
+    if info.ops.is_null() || is_err(info.ops) {
+        return err_ptr(-EINVAL);
     }
     // SAFETY: `info.ops` was checked non-null and non-error; it points to a static or exporter-owned
     // `DmaBufOps` operations table that remains immutable and valid across buffer lifetime.
     let ops = unsafe { info.ops.as_ref() };
     let Some(ops) = ops else {
-        return ERR_PTR(-EINVAL);
+        return err_ptr(-EINVAL);
     };
 
     // Linux requires these exporter operations and requires pin/unpin to be
@@ -169,15 +167,15 @@ pub unsafe extern "C" fn dma_buf_export(exp_info: *const DmaBufExportInfo) -> *m
         || ops.release.is_none()
         || ops.pin.is_some() != ops.unpin.is_some()
     {
-        return ERR_PTR(-EINVAL);
+        return err_ptr(-EINVAL);
     }
 
     let Some(alloc_size) = size_of::<DmaBuf>().checked_add(size_of::<DmaResv>()) else {
-        return ERR_PTR(-EOVERFLOW);
+        return err_ptr(-EOVERFLOW);
     };
     let dmabuf = kmalloc(alloc_size, GFP_KERNEL).cast::<DmaBuf>();
     if dmabuf.is_null() {
-        return ERR_PTR(-ENOMEM);
+        return err_ptr(-ENOMEM);
     }
     // SAFETY: `dmabuf` was just allocated with `alloc_size` bytes; initializing fields and optional in-place DmaResv.
     unsafe {
@@ -194,8 +192,8 @@ pub unsafe extern "C" fn dma_buf_export(exp_info: *const DmaBufExportInfo) -> *m
         } else {
             info.resv
         };
-        INIT_LIST_HEAD(ptr::addr_of_mut!((*dmabuf).attachments));
-        INIT_LIST_HEAD(ptr::addr_of_mut!((*dmabuf).list_node));
+        init_list_head(ptr::addr_of_mut!((*dmabuf).attachments));
+        init_list_head(ptr::addr_of_mut!((*dmabuf).list_node));
         spin_lock_init(&mut (*dmabuf).name_lock);
     }
 
@@ -213,11 +211,11 @@ pub unsafe extern "C" fn dma_buf_export(exp_info: *const DmaBufExportInfo) -> *m
             info.flags,
         )
     };
-    if IS_ERR(file) {
-        let error = PTR_ERR(file);
+    if is_err(file) {
+        let error = ptr_err(file);
         // SAFETY: `file` creation failed, clean up the allocated `dmabuf`.
         unsafe { kfree(dmabuf) };
-        return ERR_PTR(error);
+        return err_ptr(error);
     }
     // SAFETY: `dmabuf` points to the newly allocated DmaBuf and `file` is the valid ShmemFile
     // returned by anon_inode_getfile; no other thread has access to `dmabuf` yet.
@@ -225,7 +223,7 @@ pub unsafe extern "C" fn dma_buf_export(exp_info: *const DmaBufExportInfo) -> *m
     dmabuf
 }
 
-/// Linux `dma_buf_get()`: returns an owned file reference or an `ERR_PTR`.
+/// Linux `dma_buf_get()`: returns an owned file reference or an `err_ptr`.
 #[unsafe(no_mangle)]
 /// # Safety
 /// - `fd` must be an integer file descriptor within the current process table.
@@ -235,20 +233,20 @@ pub unsafe extern "C" fn dma_buf_get(fd: c_int) -> *mut DmaBuf {
     // SAFETY: `fget` safely performs table bounds-checking and reference acquisition on `fd`.
     let file = unsafe { fget(fd) };
     if file.is_null() {
-        return ERR_PTR(-EBADF);
+        return err_ptr(-EBADF);
     }
     // SAFETY: `file` was acquired via `fget`; reading `(*file).f_op` is safe while holding that reference.
     if unsafe { (*file).f_op } != ptr::addr_of!(DMA_BUF_FOPS) {
         // SAFETY: `file` is a non-null ShmemFile reference acquired above; releasing it upon type mismatch.
         unsafe { fput_file(file) };
-        return ERR_PTR(-EINVAL);
+        return err_ptr(-EINVAL);
     }
     // SAFETY: `file.f_op` matched `DMA_BUF_FOPS`, so `_private_data` contains the DmaBuf pointer set during export.
     let dmabuf = unsafe { (*file)._private_data.cast::<DmaBuf>() };
     if dmabuf.is_null() {
         // SAFETY: `file` is an owned reference acquired above; releasing it before returning error.
         unsafe { fput_file(file) };
-        return ERR_PTR(-EINVAL);
+        return err_ptr(-EINVAL);
     }
     dmabuf
 }
@@ -256,19 +254,19 @@ pub unsafe extern "C" fn dma_buf_get(fd: c_int) -> *mut DmaBuf {
 /// Linux `dma_buf_put()`: drop the file reference returned by export/get.
 #[unsafe(no_mangle)]
 /// # Safety
-/// - `dmabuf` can be null or an `ERR_PTR` (in which case this function is a no-op).
+/// - `dmabuf` can be null or an `err_ptr` (in which case this function is a no-op).
 /// - If non-null and non-error, `dmabuf` must point to a live `DmaBuf` previously obtained from
 ///   [`dma_buf_export`] or [`dma_buf_get`].
 /// - The caller relinquishes one file reference count corresponding to `dmabuf`. If this drops
 ///   the refcount to zero, the buffer is freed and `dmabuf` must not be dereferenced again.
 pub unsafe extern "C" fn dma_buf_put(dmabuf: *mut DmaBuf) {
-    if dmabuf.is_null() || IS_ERR(dmabuf) {
+    if dmabuf.is_null() || is_err(dmabuf) {
         return;
     }
-    // SAFETY: `dmabuf` is verified non-null and not ERR_PTR; the caller holds an active
+    // SAFETY: `dmabuf` is verified non-null and not err_ptr; the caller holds an active
     // reference to the buffer, ensuring `(*dmabuf).file` can be safely read.
     let file = unsafe { (*dmabuf).file.cast::<ShmemFile>() };
-    if !file.is_null() && !IS_ERR(file) {
+    if !file.is_null() && !is_err(file) {
         // SAFETY: `file` is the backing anon file of `dmabuf`; dropping one acquired reference.
         unsafe { fput_file(file) };
     }
@@ -277,7 +275,7 @@ pub unsafe extern "C" fn dma_buf_put(dmabuf: *mut DmaBuf) {
 /// Linux `dma_buf_attach()`: allocate and link a static device attachment.
 #[unsafe(no_mangle)]
 /// # Safety
-/// - `dmabuf` must be null/ERR_PTR or point to a live, initialized `DmaBuf` whose reference is held by the caller.
+/// - `dmabuf` must be null/err_ptr or point to a live, initialized `DmaBuf` whose reference is held by the caller.
 /// - `dev` must be a non-null pointer to a device struct (e.g. `struct device`) that remains valid until
 ///   [`dma_buf_detach`] is called.
 /// - On success, the caller acquires ownership of the returned `DmaBufAttachment` and must free it via [`dma_buf_detach`].
@@ -285,17 +283,17 @@ pub unsafe extern "C" fn dma_buf_attach(
     dmabuf: *mut DmaBuf,
     dev: *mut c_void,
 ) -> *mut DmaBufAttachment {
-    if dmabuf.is_null() || IS_ERR(dmabuf) || dev.is_null() {
-        return ERR_PTR(-EINVAL);
+    if dmabuf.is_null() || is_err(dmabuf) || dev.is_null() {
+        return err_ptr(-EINVAL);
     }
-    // SAFETY: `dmabuf` is verified non-null and not ERR_PTR; the caller-held reference guarantees
+    // SAFETY: `dmabuf` is verified non-null and not err_ptr; the caller-held reference guarantees
     // `(*dmabuf).ops` is valid and immutable.
     let Some(ops) = (unsafe { (*dmabuf).ops.as_ref() }) else {
-        return ERR_PTR(-EINVAL);
+        return err_ptr(-EINVAL);
     };
     let attach = drm_kapi::memory::kzalloc_obj::<DmaBufAttachment>();
     if attach.is_null() {
-        return ERR_PTR(-ENOMEM);
+        return err_ptr(-ENOMEM);
     }
     // SAFETY: `attach` was freshly allocated via kzalloc_obj and is uniquely owned.
     // Initializing fields, calling exporter attach callback, and linking into `(*dmabuf).attachments`
@@ -303,12 +301,12 @@ pub unsafe extern "C" fn dma_buf_attach(
     unsafe {
         (*attach).dmabuf = dmabuf;
         (*attach).dev = dev;
-        INIT_LIST_HEAD(ptr::addr_of_mut!((*attach).node));
+        init_list_head(ptr::addr_of_mut!((*attach).node));
         if let Some(attach_op) = ops.attach {
             let ret = attach_op(dmabuf, attach);
             if ret != 0 {
                 kfree(attach);
-                return ERR_PTR(ret);
+                return err_ptr(ret);
             }
         }
         spin_lock_raw(ptr::addr_of_mut!((*dmabuf).name_lock));
@@ -325,17 +323,17 @@ pub unsafe extern "C" fn dma_buf_attach(
 /// the attachment record.
 #[unsafe(no_mangle)]
 /// # Safety
-/// - `dmabuf` can be null or ERR_PTR (no-op).
-/// - `attach` can be null or ERR_PTR (no-op).
+/// - `dmabuf` can be null or err_ptr (no-op).
+/// - `attach` can be null or err_ptr (no-op).
 /// - If non-null, `attach` must point to a live `DmaBufAttachment` created by [`dma_buf_attach`] on `dmabuf`.
 /// - All scatter-gather mappings created via [`dma_buf_map_attachment_unlocked`] for `attach`
 ///   must have been unmapped via [`dma_buf_unmap_attachment_unlocked`] prior to detachment.
 /// - `attach` is deallocated by this function and must not be accessed after this call.
 pub unsafe extern "C" fn dma_buf_detach(dmabuf: *mut DmaBuf, attach: *mut DmaBufAttachment) {
-    if dmabuf.is_null() || IS_ERR(dmabuf) || attach.is_null() || IS_ERR(attach) {
+    if dmabuf.is_null() || is_err(dmabuf) || attach.is_null() || is_err(attach) {
         return;
     }
-    // SAFETY: `attach` is verified non-null and not ERR_PTR; reading `(*attach).dmabuf` is safe
+    // SAFETY: `attach` is verified non-null and not err_ptr; reading `(*attach).dmabuf` is safe
     // while the caller retains ownership of the attachment.
     if unsafe { (*attach).dmabuf != dmabuf } {
         return;
@@ -362,10 +360,10 @@ pub unsafe extern "C" fn dma_buf_detach(dmabuf: *mut DmaBuf, attach: *mut DmaBuf
 ///
 /// # Safety
 ///
-/// `dmabuf` must be null, ERR_PTR, or a valid `DmaBuf` pointer whose `resv` points to an initialized `DmaResv`.
+/// `dmabuf` must be null, err_ptr, or a valid `DmaBuf` pointer whose `resv` points to an initialized `DmaResv`.
 unsafe fn lock_reservation(dmabuf: *mut DmaBuf) -> Result<(), c_int> {
-    // SAFETY: `dmabuf` is checked for null/ERR_PTR before reading its `resv` field.
-    if dmabuf.is_null() || IS_ERR(dmabuf) || unsafe { (*dmabuf).resv.is_null() } {
+    // SAFETY: `dmabuf` is checked for null/err_ptr before reading its `resv` field.
+    if dmabuf.is_null() || is_err(dmabuf) || unsafe { (*dmabuf).resv.is_null() } {
         return Err(-EINVAL);
     }
     // SAFETY: `dmabuf` has a non-null `resv` containing an initialized ww_mutex lock.
@@ -387,7 +385,7 @@ unsafe fn unlock_reservation(dmabuf: *mut DmaBuf) {
 /// exporter pins/maps and return its real scatterlist or an explicit error.
 #[unsafe(no_mangle)]
 /// # Safety
-/// - `attach` must be null/ERR_PTR or point to a live `DmaBufAttachment` whose `dmabuf` field
+/// - `attach` must be null/err_ptr or point to a live `DmaBufAttachment` whose `dmabuf` field
 ///   points to a valid `DmaBuf`.
 /// - The backing buffer's `ops` must implement `map_dma_buf` and `unmap_dma_buf`.
 /// - `direction` must be a valid DMA data direction constant (`DMA_BIDIRECTIONAL`, `DMA_TO_DEVICE`, etc.).
@@ -397,28 +395,28 @@ pub unsafe extern "C" fn dma_buf_map_attachment_unlocked(
     attach: *mut DmaBufAttachment,
     direction: c_int,
 ) -> *mut SgTable {
-    // SAFETY: `attach` is checked for null/ERR_PTR before reading its `dmabuf` field.
+    // SAFETY: `attach` is checked for null/err_ptr before reading its `dmabuf` field.
     if attach.is_null()
-        || IS_ERR(attach)
-        || unsafe { (*attach).dmabuf.is_null() || IS_ERR((*attach).dmabuf) }
+        || is_err(attach)
+        || unsafe { (*attach).dmabuf.is_null() || is_err((*attach).dmabuf) }
     {
-        return ERR_PTR(-EINVAL);
+        return err_ptr(-EINVAL);
     }
     // SAFETY: `attach` is confirmed non-null/non-ERR and `(*attach).dmabuf` is verified non-null.
     let dmabuf = unsafe { (*attach).dmabuf };
     // SAFETY: `dmabuf` is a valid pointer whose ops table is guaranteed valid by the exporter.
     let Some(ops) = (unsafe { (*dmabuf).ops.as_ref() }) else {
-        return ERR_PTR(-EINVAL);
+        return err_ptr(-EINVAL);
     };
     let Some(map) = ops.map_dma_buf else {
-        return ERR_PTR(-EOPNOTSUPP);
+        return err_ptr(-EOPNOTSUPP);
     };
     if ops.unmap_dma_buf.is_none() {
-        return ERR_PTR(-EOPNOTSUPP);
+        return err_ptr(-EOPNOTSUPP);
     }
     // SAFETY: `dmabuf` is valid; locking its reservation object around pin/map calls.
     if let Err(error) = unsafe { lock_reservation(dmabuf) } {
-        return ERR_PTR(error);
+        return err_ptr(error);
     }
 
     let mut pinned = false;
@@ -432,16 +430,16 @@ pub unsafe extern "C" fn dma_buf_map_attachment_unlocked(
         // SAFETY: `attach` is valid and the buffer reservation lock is held as required by exporter map.
         unsafe { map(attach, direction) }
     } else {
-        ERR_PTR(result)
+        err_ptr(result)
     };
-    if IS_ERR(sgt) || sgt.is_null() {
+    if is_err(sgt) || sgt.is_null() {
         if pinned && let Some(unpin) = ops.unpin {
             // SAFETY: `attach` is valid and the buffer reservation lock is held as required by exporter unpin.
             unsafe { unpin(attach) };
         }
         // SAFETY: unlocking reservation lock previously acquired via lock_reservation on error path.
         unsafe { unlock_reservation(dmabuf) };
-        return if sgt.is_null() { ERR_PTR(-EINVAL) } else { sgt };
+        return if sgt.is_null() { err_ptr(-EINVAL) } else { sgt };
     }
     // SAFETY: unlocking reservation lock previously acquired via lock_reservation on success path.
     unsafe { unlock_reservation(dmabuf) };
@@ -452,8 +450,8 @@ pub unsafe extern "C" fn dma_buf_map_attachment_unlocked(
 /// acquired by the matching static attachment map.
 #[unsafe(no_mangle)]
 /// # Safety
-/// - `attach` must be null/ERR_PTR or point to a live `DmaBufAttachment` previously mapped.
-/// - `sgt` must be null/ERR_PTR or point to the `SgTable` returned by a prior matching call to
+/// - `attach` must be null/err_ptr or point to a live `DmaBufAttachment` previously mapped.
+/// - `sgt` must be null/err_ptr or point to the `SgTable` returned by a prior matching call to
 ///   [`dma_buf_map_attachment_unlocked`].
 /// - `direction` must match the direction passed to [`dma_buf_map_attachment_unlocked`].
 /// - After this call, `sgt` is consumed/freed by the exporter and must not be dereferenced.
@@ -462,12 +460,12 @@ pub unsafe extern "C" fn dma_buf_unmap_attachment_unlocked(
     sgt: *mut SgTable,
     direction: c_int,
 ) {
-    if attach.is_null() || IS_ERR(attach) || sgt.is_null() || IS_ERR(sgt) {
+    if attach.is_null() || is_err(attach) || sgt.is_null() || is_err(sgt) {
         return;
     }
     // SAFETY: `attach` is verified non-null and not an error pointer; reading its `dmabuf` field.
     let dmabuf = unsafe { (*attach).dmabuf };
-    if dmabuf.is_null() || IS_ERR(dmabuf) {
+    if dmabuf.is_null() || is_err(dmabuf) {
         return;
     }
     // SAFETY: `dmabuf` is verified non-null and not an error pointer; reading `(*dmabuf).ops`.
@@ -497,12 +495,12 @@ pub unsafe extern "C" fn dma_buf_unmap_attachment_unlocked(
 /// callback is permitted for exporters that need no cache maintenance.
 #[unsafe(no_mangle)]
 /// # Safety
-/// - `dmabuf` must be null/ERR_PTR or point to a live `DmaBuf` whose reference is retained by the caller.
+/// - `dmabuf` must be null/err_ptr or point to a live `DmaBuf` whose reference is retained by the caller.
 /// - `direction` must be a valid DMA direction constant (`DMA_BIDIRECTIONAL`, `DMA_TO_DEVICE`, or `DMA_FROM_DEVICE`).
 /// - Every successful call to `dma_buf_begin_cpu_access` must eventually be balanced by a call to
 ///   [`dma_buf_end_cpu_access`] with the same direction before device access resumes.
 pub unsafe extern "C" fn dma_buf_begin_cpu_access(dmabuf: *mut DmaBuf, direction: c_int) -> c_int {
-    if dmabuf.is_null() || IS_ERR(dmabuf) {
+    if dmabuf.is_null() || is_err(dmabuf) {
         return -EINVAL;
     }
     // SAFETY: `dmabuf` is verified non-null and not an error pointer; reading `(*dmabuf).ops`.
@@ -549,10 +547,10 @@ pub unsafe extern "C" fn dma_buf_begin_cpu_access(dmabuf: *mut DmaBuf, direction
 /// DMA-BUF API for exporters that need no cache maintenance.
 #[unsafe(no_mangle)]
 /// # Safety
-/// - `dmabuf` must be null/ERR_PTR or point to a live `DmaBuf` whose reference is retained by the caller.
+/// - `dmabuf` must be null/err_ptr or point to a live `DmaBuf` whose reference is retained by the caller.
 /// - `direction` must match the direction passed to a preceding successful call to [`dma_buf_begin_cpu_access`].
 pub unsafe extern "C" fn dma_buf_end_cpu_access(dmabuf: *mut DmaBuf, direction: c_int) -> c_int {
-    if dmabuf.is_null() || IS_ERR(dmabuf) {
+    if dmabuf.is_null() || is_err(dmabuf) {
         return -EINVAL;
     }
     // SAFETY: `dmabuf` is verified non-null and not an error pointer; reading `(*dmabuf).ops`.
@@ -574,7 +572,7 @@ mod tests {
     };
 
     use drm_kapi::{
-        config::{EINVAL, ERR_PTR, IS_ERR},
+        config::{EINVAL, err_ptr, is_err},
         memory::{kfree, kmalloc},
         types::{Scatterlist, SgTable},
     };
@@ -611,7 +609,7 @@ mod tests {
         let bytes = size_of::<SgTable>() + size_of::<Scatterlist>();
         let sgt = kmalloc(bytes, GFP_KERNEL).cast::<SgTable>();
         if sgt.is_null() {
-            return ERR_PTR(-ENOMEM);
+            return err_ptr(-ENOMEM);
         }
         // SAFETY: pointer arithmetic within the single allocated block for SgTable + Scatterlist.
         let sgl = unsafe {
@@ -715,7 +713,7 @@ mod tests {
         };
         // SAFETY: `info` is a valid test export descriptor.
         let dmabuf = unsafe { dma_buf_export(&info) };
-        assert!(!IS_ERR(dmabuf));
+        assert!(!is_err(dmabuf));
         // SAFETY: `dmabuf` is non-null and holds a valid backing file.
         let file = unsafe { (*dmabuf).file.cast::<ShmemFile>() };
         // SAFETY: `file` is valid ShmemFile for `dmabuf`.
@@ -736,7 +734,7 @@ mod tests {
 
         // SAFETY: attaching mock device to `dmabuf`.
         let attach = unsafe { dma_buf_attach(dmabuf, 0x4000usize as *mut c_void) };
-        assert!(!IS_ERR(attach));
+        assert!(!is_err(attach));
         assert_eq!(ATTACHES.load(Ordering::SeqCst), 1);
         // SAFETY: testing cpu access begin.
         assert_eq!(unsafe { dma_buf_begin_cpu_access(dmabuf, 0) }, 0);
@@ -746,7 +744,7 @@ mod tests {
         assert_eq!(ENDS.load(Ordering::SeqCst), 1);
         // SAFETY: testing mapping attachment.
         let sgt = unsafe { dma_buf_map_attachment_unlocked(attach, 0) };
-        assert!(!IS_ERR(sgt));
+        assert!(!is_err(sgt));
         // SAFETY: testing unmapping attachment.
         unsafe { dma_buf_unmap_attachment_unlocked(attach, sgt, 0) };
         assert_eq!(UNMAPS.load(Ordering::SeqCst), 1);
@@ -792,14 +790,14 @@ mod tests {
         };
         // SAFETY: testing export rejection of incomplete ops.
         let err = unsafe { dma_buf_export(&info) };
-        assert!(IS_ERR(err));
-        assert_eq!(drm_kapi::config::PTR_ERR(err), -EINVAL);
+        assert!(is_err(err));
+        assert_eq!(drm_kapi::config::ptr_err(err), -EINVAL);
 
         let fd = crate::drm_syncobj_upstream::test_file_ops::install_plain_file();
         // SAFETY: testing get on non-DMA-BUF file.
         let err = unsafe { dma_buf_get(fd) };
-        assert!(IS_ERR(err));
-        assert_eq!(drm_kapi::config::PTR_ERR(err), -EINVAL);
+        assert!(is_err(err));
+        assert_eq!(drm_kapi::config::ptr_err(err), -EINVAL);
 
         // SAFETY: testing fget on plain file.
         let file = unsafe { drm_kapi::kernel_services::fget(fd) };

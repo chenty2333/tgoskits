@@ -13,7 +13,7 @@ use ax_gpu::{
     },
 };
 use drm_kapi::{
-    config::{ERR_PTR, GFP_KERNEL, IS_ERR, PAGE_SIZE},
+    config::{GFP_KERNEL, PAGE_SIZE, err_ptr, is_err},
     memory::{kfree, kmalloc, kzalloc},
     scatterlist::{
         sg_alloc_table, sg_dma_address, sg_dma_len, sg_free_table, sg_mark_end, sg_next,
@@ -110,6 +110,7 @@ struct ObjectState {
     stride: u32,
     format: Option<PixelFormat>,
     mapping: Option<Arc<MappableBacking>>,
+    host_mapping: Option<super::host_blob::HostMapping>,
     backing: Option<Arc<dyn Backing>>,
     resource: Option<BufferHandle>,
     resource_3d: Option<Resource3d>,
@@ -131,6 +132,7 @@ impl ObjectState {
             stride: 0,
             format: None,
             mapping: None,
+            host_mapping: None,
             backing: None,
             resource: None,
             resource_3d: None,
@@ -140,6 +142,18 @@ impl ObjectState {
             blob_mem: 0,
             blob_flags: 0,
             is_blob: false,
+        }
+    }
+}
+
+impl Drop for ObjectState {
+    fn drop(&mut self) {
+        if let Some(resource) = self.resource.take() {
+            if self.host_mapping.is_some() {
+                super::host_blob::unmap_before_release(resource);
+            }
+            // Keep every backing owner and BAR slot live until completion.
+            release_resource(resource);
         }
     }
 }
@@ -215,7 +229,7 @@ pub(crate) unsafe extern "C" fn create_object(
 ) -> *mut DrmGemObject {
     let shmem = kzalloc(size_of::<DrmGemShmemObject>(), GFP_KERNEL).cast::<DrmGemShmemObject>();
     if shmem.is_null() {
-        return ERR_PTR::<DrmGemObject>(NEG_ENOMEM);
+        return err_ptr::<DrmGemObject>(NEG_ENOMEM);
     }
     // The shmem initializer fills the base fields and uses our free callback.
     // SAFETY: `shmem` is non-null and points to a newly allocated `DrmGemShmemObject`.
@@ -351,12 +365,7 @@ pub(crate) unsafe extern "C" fn dumb_create(
     // SAFETY: `dev` is a live `DrmDevice`; `state` contains initialized fields and Arc references.
     let obj = match unsafe { allocate_gem_object(dev, size, false, state) } {
         Ok(obj) => obj,
-        Err(error) => {
-            if let Some(resource) = resource {
-                release_resource(resource);
-            }
-            return error;
-        }
+        Err(error) => return error,
     };
     let mut handle = 0;
     // SAFETY: `file` and `obj` are live DRM objects; `handle` is a valid stack pointer.
@@ -398,7 +407,7 @@ pub(crate) unsafe extern "C" fn dumb_map_offset(
     if object.is_null() {
         return NEG_ENOENT;
     }
-    let mappable = !is_imported(object) && map_backing(object).is_some();
+    let mappable = !is_imported(object) && cpu_mapping(object).is_some();
     // SAFETY: Drops the reference obtained from `drm_gem_object_lookup`.
     unsafe { drm_gem_object_put(object) };
     if !mappable {
@@ -423,11 +432,11 @@ pub(crate) unsafe fn create_framebuffer(
     pixel_format: PixelFormat,
 ) -> *mut DrmFramebuffer {
     if dev.is_null() || file.is_null() || format.is_null() || command.is_null() {
-        return ERR_PTR::<DrmFramebuffer>(NEG_EINVAL);
+        return err_ptr::<DrmFramebuffer>(NEG_EINVAL);
     }
     let framebuffer = kzalloc(size_of::<AxFramebuffer>(), GFP_KERNEL).cast::<AxFramebuffer>();
     if framebuffer.is_null() {
-        return ERR_PTR::<DrmFramebuffer>(NEG_ENOMEM);
+        return err_ptr::<DrmFramebuffer>(NEG_ENOMEM);
     }
     // SAFETY: `framebuffer` points to newly allocated zeroed memory of size `AxFramebuffer`.
     unsafe { ptr::addr_of_mut!((*framebuffer).scanout_resource).write(None) };
@@ -438,7 +447,7 @@ pub(crate) unsafe fn create_framebuffer(
     if ret != 0 {
         // SAFETY: Free the allocated AxFramebuffer on initialization failure.
         unsafe { kfree(framebuffer.cast::<c_void>()) };
-        return ERR_PTR::<DrmFramebuffer>(ret);
+        return err_ptr::<DrmFramebuffer>(ret);
     }
 
     // Same-device PRIME imports returned by kdrm-core's cache already have
@@ -452,7 +461,7 @@ pub(crate) unsafe fn create_framebuffer(
             Err(error) => {
                 // SAFETY: Release framebuffer references on error.
                 unsafe { drm_framebuffer_put(base) };
-                return ERR_PTR::<DrmFramebuffer>(error);
+                return err_ptr::<DrmFramebuffer>(error);
             }
         };
         // SAFETY: `framebuffer` is exclusively owned during initialization.
@@ -650,6 +659,7 @@ unsafe extern "C" fn ax_framebuffer_dirtyfb(
 pub(crate) struct VirglObjectInfo {
     pub(crate) size: usize,
     pub(crate) mapping: Option<Arc<MappableBacking>>,
+    pub(super) host_mapping: Option<super::host_blob::HostMapping>,
     pub(crate) backing: Option<Arc<dyn Backing>>,
     pub(crate) resource: BufferHandle,
     pub(crate) resource_3d: Option<Resource3d>,
@@ -664,11 +674,9 @@ pub(crate) fn create_virgl_object(
     dev: *mut DrmDevice,
     info: VirglObjectInfo,
 ) -> Result<*mut DrmGemObject, i32> {
-    if info.size == 0 {
-        return Err(NEG_EINVAL);
-    }
     let mut state = ObjectState::new(info.size);
     state.mapping = info.mapping;
+    state.host_mapping = info.host_mapping;
     state.backing = info.backing;
     state.resource = Some(info.resource);
     state.resource_3d = info.resource_3d;
@@ -677,6 +685,9 @@ pub(crate) fn create_virgl_object(
     state.blob_mem = info.blob_mem;
     state.blob_flags = info.blob_flags;
     state.is_blob = info.is_blob;
+    if info.size == 0 {
+        return Err(NEG_EINVAL);
+    }
     // SAFETY: `dev` is a live `DrmDevice` pointer.
     unsafe { allocate_gem_object(dev, info.size, false, state) }
 }
@@ -728,12 +739,12 @@ pub(crate) unsafe extern "C" fn prime_import_sg_table(
     sgt: *mut SgTable,
 ) -> *mut DrmGemObject {
     if dev.is_null() || attach.is_null() || sgt.is_null() {
-        return ERR_PTR::<DrmGemObject>(NEG_EINVAL);
+        return err_ptr::<DrmGemObject>(NEG_EINVAL);
     }
     let attachment = attach.cast::<DmaBufAttachment>();
     // SAFETY: The core passes a live DMA-BUF attachment to this callback; checks `dmabuf` pointer.
     if unsafe { (*attachment).dmabuf.is_null() } {
-        return ERR_PTR::<DrmGemObject>(NEG_EINVAL);
+        return err_ptr::<DrmGemObject>(NEG_EINVAL);
     }
     // The kdrm-core PRIME self-export cache returns the original GEM object
     // before invoking this callback. Foreign Direct-domain DMA-BUFs retain
@@ -742,19 +753,19 @@ pub(crate) unsafe extern "C" fn prime_import_sg_table(
     // SAFETY: `attachment` is a valid `DmaBufAttachment` pointer.
     let dmabuf = unsafe { (*attachment).dmabuf };
     // SAFETY: Checks whether `dmabuf` is error pointer or `sgt->sgl` is null.
-    if dmabuf.is_null() || IS_ERR(dmabuf) || unsafe { (*sgt).sgl.is_null() } {
-        return ERR_PTR::<DrmGemObject>(NEG_EINVAL);
+    if dmabuf.is_null() || is_err(dmabuf) || unsafe { (*sgt).sgl.is_null() } {
+        return err_ptr::<DrmGemObject>(NEG_EINVAL);
     }
     let Some(capabilities) = ax_gpu::capabilities() else {
-        return ERR_PTR::<DrmGemObject>(NEG_ENODEV);
+        return err_ptr::<DrmGemObject>(NEG_ENODEV);
     };
     if capabilities.dma_domain != DmaDomainId::Direct {
-        return ERR_PTR::<DrmGemObject>(NEG_EOPNOTSUPP);
+        return err_ptr::<DrmGemObject>(NEG_EOPNOTSUPP);
     }
     // SAFETY: `dmabuf` is verified non-null and not error; reads `size` field.
     let backing = match imported_backing(sgt, unsafe { (*dmabuf).size }, dmabuf) {
         Ok(backing) => Arc::new(backing),
-        Err(error) => return ERR_PTR::<DrmGemObject>(error),
+        Err(error) => return err_ptr::<DrmGemObject>(error),
     };
     // SAFETY: Core helper allocates a `DrmGemShmemObject` shell for the imported attachment.
     let obj = unsafe {
@@ -762,7 +773,7 @@ pub(crate) unsafe extern "C" fn prime_import_sg_table(
             dev, attachment, sgt,
         )
     };
-    if obj.is_null() || IS_ERR(obj) {
+    if obj.is_null() || is_err(obj) {
         return obj;
     }
     let private = allocate_private(true, backing.len());
@@ -772,7 +783,7 @@ pub(crate) unsafe extern "C" fn prime_import_sg_table(
         unsafe { (*obj.cast::<DrmGemShmemObject>()).sgt = ptr::null_mut() };
         // SAFETY: Release the newly allocated GEM object on private allocation failure.
         unsafe { drm_gem_object_put(obj) };
-        return ERR_PTR::<DrmGemObject>(NEG_ENOMEM);
+        return err_ptr::<DrmGemObject>(NEG_ENOMEM);
     }
     // SAFETY: `private` and `obj` are freshly allocated and exclusively owned here.
     unsafe {
@@ -785,6 +796,7 @@ pub(crate) unsafe extern "C" fn prime_import_sg_table(
             format: None,
             mapping: None,
             backing: Some(backing),
+            host_mapping: None,
             resource: None,
             resource_3d: None,
             context: None,
@@ -805,7 +817,7 @@ fn imported_backing(
     size: usize,
     dmabuf: *mut DmaBuf,
 ) -> Result<ImportedBacking, i32> {
-    if size == 0 || sgt.is_null() || dmabuf.is_null() || IS_ERR(dmabuf) {
+    if size == 0 || sgt.is_null() || dmabuf.is_null() || is_err(dmabuf) {
         return Err(NEG_EINVAL);
     }
     // SAFETY: `sgt` is verified non-null and points to a valid `SgTable`.
@@ -897,7 +909,7 @@ unsafe impl Backing for ImportedBacking {
 /// `obj` must be null or point to a live `DrmGemObject` with an active reference.
 unsafe extern "C" fn gem_export(obj: *mut DrmGemObject, flags: i32) -> *mut c_void {
     if obj.is_null() {
-        return ERR_PTR::<c_void>(NEG_EINVAL);
+        return err_ptr::<c_void>(NEG_EINVAL);
     }
     // SAFETY: Called by the DRM core with a live GEM reference.
     unsafe { drm_gem_prime_export(obj, flags).cast() }
@@ -910,32 +922,32 @@ unsafe extern "C" fn gem_get_sg_table(obj: *mut DrmGemObject) -> *mut SgTable {
     // A Direct domain preserves the physical identity needed to build SG
     // pages. Translated-domain PRIME export requires a device-specific mapping.
     if !ax_gpu::capabilities().is_some_and(|caps| caps.dma_domain == DmaDomainId::Direct) {
-        return ERR_PTR::<SgTable>(NEG_EOPNOTSUPP);
+        return err_ptr::<SgTable>(NEG_EOPNOTSUPP);
     }
     // SAFETY: DRM invokes get_sg_table with a live GEM object reference.
     let Some(private) = (unsafe { private_from_object(obj) }) else {
-        return ERR_PTR::<SgTable>(NEG_EINVAL);
+        return err_ptr::<SgTable>(NEG_EINVAL);
     };
     let backing = private.state.lock().backing.clone();
     let Some(backing) = backing else {
-        return ERR_PTR::<SgTable>(NEG_EOPNOTSUPP);
+        return err_ptr::<SgTable>(NEG_EOPNOTSUPP);
     };
     if backing.domain_id() != DmaDomainId::Direct {
-        return ERR_PTR::<SgTable>(NEG_EOPNOTSUPP);
+        return err_ptr::<SgTable>(NEG_EOPNOTSUPP);
     }
     let source = backing.segments();
     let mut segments = Vec::new();
     if segments.try_reserve_exact(source.len()).is_err() {
-        return ERR_PTR::<SgTable>(NEG_ENOMEM);
+        return err_ptr::<SgTable>(NEG_ENOMEM);
     }
     segments.extend_from_slice(source);
     if segments.is_empty() || segments.len() > u32::MAX as usize {
-        return ERR_PTR::<SgTable>(NEG_EINVAL);
+        return err_ptr::<SgTable>(NEG_EINVAL);
     }
     let page_count = match sg_page_count(&segments) {
         Ok(count) if count > 0 && count <= u32::MAX as usize => count,
-        Ok(_) => return ERR_PTR::<SgTable>(NEG_EINVAL),
-        Err(error) => return ERR_PTR::<SgTable>(error),
+        Ok(_) => return err_ptr::<SgTable>(NEG_EINVAL),
+        Err(error) => return err_ptr::<SgTable>(error),
     };
 
     // The Direct RDIF contract makes each segment address a physical address.
@@ -944,7 +956,7 @@ unsafe extern "C" fn gem_get_sg_table(obj: *mut DrmGemObject) -> *mut SgTable {
     // rather than fabricating an SG page identity from its bus address.
     let candidate = match pin_sg_pages(&segments, page_count) {
         Ok(pages) => pages,
-        Err(error) => return ERR_PTR::<SgTable>(error),
+        Err(error) => return err_ptr::<SgTable>(error),
     };
     let mut candidate = Some(candidate);
     let (page_array, retained_page_count) = {
@@ -953,7 +965,7 @@ unsafe extern "C" fn gem_get_sg_table(obj: *mut DrmGemObject) -> *mut SgTable {
             state.export_pages = candidate.take();
         }
         let Some(pages) = state.export_pages.as_ref() else {
-            return ERR_PTR::<SgTable>(NEG_ENOMEM);
+            return err_ptr::<SgTable>(NEG_ENOMEM);
         };
         (pages.pages.as_ptr(), pages.pages.len())
     };
@@ -961,12 +973,12 @@ unsafe extern "C" fn gem_get_sg_table(obj: *mut DrmGemObject) -> *mut SgTable {
     // set of Page references; the installed set remains object-owned.
     drop(candidate);
     if retained_page_count != page_count {
-        return ERR_PTR::<SgTable>(NEG_EOPNOTSUPP);
+        return err_ptr::<SgTable>(NEG_EOPNOTSUPP);
     }
 
     let table = kmalloc(size_of::<SgTable>(), GFP_KERNEL).cast::<SgTable>();
     if table.is_null() {
-        return ERR_PTR::<SgTable>(NEG_ENOMEM);
+        return err_ptr::<SgTable>(NEG_ENOMEM);
     }
     // SAFETY: `table` is a newly allocated block of `size_of::<SgTable>()` bytes.
     unsafe { ptr::write_bytes(table, 0, 1) };
@@ -975,7 +987,7 @@ unsafe extern "C" fn gem_get_sg_table(obj: *mut DrmGemObject) -> *mut SgTable {
     if ret != 0 {
         // SAFETY: Free the allocated table storage on allocation failure.
         unsafe { kfree(table.cast::<c_void>()) };
-        return ERR_PTR::<SgTable>(ret);
+        return err_ptr::<SgTable>(ret);
     }
     // SAFETY: `table` was successfully allocated by `sg_alloc_table`.
     let mut sg = unsafe { (*table).sgl };
@@ -989,7 +1001,7 @@ unsafe extern "C" fn gem_get_sg_table(obj: *mut DrmGemObject) -> *mut SgTable {
                     sg_free_table(table);
                     kfree(table.cast::<c_void>());
                 }
-                return ERR_PTR::<SgTable>(error);
+                return err_ptr::<SgTable>(error);
             }
         };
         while current < end {
@@ -999,7 +1011,7 @@ unsafe extern "C" fn gem_get_sg_table(obj: *mut DrmGemObject) -> *mut SgTable {
                     sg_free_table(table);
                     kfree(table.cast::<c_void>());
                 }
-                return ERR_PTR::<SgTable>(NEG_EINVAL);
+                return err_ptr::<SgTable>(NEG_EINVAL);
             }
             let Some((_page_base, offset, length)) = sg_page_chunk(current, end) else {
                 // SAFETY: Free table entries and container on failure.
@@ -1007,7 +1019,7 @@ unsafe extern "C" fn gem_get_sg_table(obj: *mut DrmGemObject) -> *mut SgTable {
                     sg_free_table(table);
                     kfree(table.cast::<c_void>());
                 }
-                return ERR_PTR::<SgTable>(NEG_EINVAL);
+                return err_ptr::<SgTable>(NEG_EINVAL);
             };
             let (Ok(offset), Ok(length)) = (u32::try_from(offset), u32::try_from(length)) else {
                 // SAFETY: Free table entries and container on failure.
@@ -1015,7 +1027,7 @@ unsafe extern "C" fn gem_get_sg_table(obj: *mut DrmGemObject) -> *mut SgTable {
                     sg_free_table(table);
                     kfree(table.cast::<c_void>());
                 }
-                return ERR_PTR::<SgTable>(-drm_kapi::config::EOVERFLOW);
+                return err_ptr::<SgTable>(-drm_kapi::config::EOVERFLOW);
             };
             // SAFETY: page_array points into immutable ObjectState-owned pins;
             // the GEM reference provided to get_sg_table keeps them alive.
@@ -1026,7 +1038,7 @@ unsafe extern "C" fn gem_get_sg_table(obj: *mut DrmGemObject) -> *mut SgTable {
                     sg_free_table(table);
                     kfree(table.cast::<c_void>());
                 }
-                return ERR_PTR::<SgTable>(NEG_EINVAL);
+                return err_ptr::<SgTable>(NEG_EINVAL);
             }
             // SAFETY: `sg` is a valid pointer within `table`'s scatterlist.
             unsafe {
@@ -1050,7 +1062,7 @@ unsafe extern "C" fn gem_get_sg_table(obj: *mut DrmGemObject) -> *mut SgTable {
             sg_free_table(table);
             kfree(table.cast::<c_void>());
         }
-        return ERR_PTR::<SgTable>(NEG_EINVAL);
+        return err_ptr::<SgTable>(NEG_EINVAL);
     }
     // SAFETY: `sg` points to the final valid entry in the scatterlist.
     unsafe { sg_mark_end(sg) };
@@ -1136,9 +1148,7 @@ unsafe extern "C" fn gem_free(obj: *mut DrmGemObject) {
         // GEM release guarantees no callback still holds it.
         let private = unsafe { BoxedPrivate::from_raw(private_ptr) };
         let state = core::mem::replace(&mut *private.state.lock(), ObjectState::new(0));
-        if let Some(resource) = state.resource {
-            release_resource(resource);
-        }
+        drop(state);
         if private.shmem_object {
             // SAFETY: Imported and helper-created objects have a full
             // DrmGemShmemObject allocation with the common GEM object at 0.
@@ -1296,12 +1306,6 @@ pub(crate) fn scanout_buffer(
     }
 }
 
-pub(crate) fn map_backing(obj: *mut DrmGemObject) -> Option<Arc<MappableBacking>> {
-    // SAFETY: Caller acquired an object reference during VMA offset lookup.
-    let private = unsafe { private_from_object(obj) }?;
-    private.state.lock().mapping.clone()
-}
-
 pub(crate) fn is_imported(obj: *mut DrmGemObject) -> bool {
     if obj.is_null() {
         return true;
@@ -1318,6 +1322,30 @@ pub(crate) fn gpu_error_to_errno(error: GpuError) -> i32 {
         GpuError::OutOfMemory => NEG_ENOMEM,
         GpuError::Busy | GpuError::NotReady => -drm_kapi::config::EBUSY,
         _ => NEG_EIO,
+    }
+}
+
+/// CPU-visible storage retained by the object's GEM reference. Host-visible
+/// BAR pages are not DMA backing and must never be exported as normal SG RAM.
+pub(crate) struct CpuMapping {
+    pub(crate) physical: ax_memory_addr::PhysAddrRange,
+    pub(crate) cached: bool,
+}
+
+pub(crate) fn cpu_mapping(obj: *mut DrmGemObject) -> Option<CpuMapping> {
+    // SAFETY: The caller holds a live GEM reference throughout mapping lookup.
+    let private = unsafe { private_from_object(obj) }?;
+    let state = private.state.lock();
+    if let Some(host) = &state.host_mapping {
+        Some(CpuMapping {
+            physical: host.physical,
+            cached: host.cached,
+        })
+    } else {
+        state.mapping.as_ref().map(|mapping| CpuMapping {
+            physical: mapping.physical(),
+            cached: false,
+        })
     }
 }
 

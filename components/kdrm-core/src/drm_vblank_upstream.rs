@@ -17,7 +17,6 @@
 
 // The Linux ports state the invariant of each C-ABI call once in the module
 // header, as the GT ports do; per-block SAFETY prose is not repeated.
-#![allow(non_snake_case)]
 
 use core::{
     ffi::c_void,
@@ -2540,7 +2539,7 @@ mod tests {
         vec::Vec,
     };
 
-    use drm_kapi::{list::INIT_LIST_HEAD, wait::init_waitqueue_head};
+    use drm_kapi::{list::init_list_head, wait::init_waitqueue_head};
 
     use super::*;
     use crate::{
@@ -2621,9 +2620,9 @@ mod tests {
             // SAFETY: Initializes test fixture device and CRTC structs with test allocations.
             unsafe {
                 (*dev).dev_private = Arc::as_ptr(&hw).cast_mut().cast();
-                INIT_LIST_HEAD(core::ptr::addr_of_mut!((*dev).mode_config.crtc_list));
-                INIT_LIST_HEAD(core::ptr::addr_of_mut!((*dev).mode_config.plane_list));
-                INIT_LIST_HEAD(core::ptr::addr_of_mut!((*dev).vblank_event_list));
+                init_list_head(core::ptr::addr_of_mut!((*dev).mode_config.crtc_list));
+                init_list_head(core::ptr::addr_of_mut!((*dev).mode_config.plane_list));
+                init_list_head(core::ptr::addr_of_mut!((*dev).vblank_event_list));
                 drm_kapi::locks::spin_lock_init(&mut (*dev).vbl_lock);
                 drm_kapi::locks::spin_lock_init(&mut (*dev).vblank_time_lock);
                 drm_kapi::locks::spin_lock_init(&mut (*dev).event_lock);
@@ -2639,7 +2638,7 @@ mod tests {
                     (*v).pipe = i;
                     (*v).config.offdelay_ms = -1; // immediate disable
                     init_waitqueue_head(&mut (*v).queue);
-                    INIT_LIST_HEAD(core::ptr::addr_of_mut!((*v).pending_work));
+                    init_list_head(core::ptr::addr_of_mut!((*v).pending_work));
                     init_waitqueue_head(&mut (*v).work_wait_queue);
                     drm_kapi::locks::spin_lock_init(&mut (*v).seqlock.lock);
                 }
@@ -2655,7 +2654,7 @@ mod tests {
                     (*crtc).dev = dev;
                     (*crtc).index = i;
                     (*crtc).funcs = funcs as *mut DrmCrtcFuncs;
-                    INIT_LIST_HEAD(core::ptr::addr_of_mut!((*crtc).head));
+                    init_list_head(core::ptr::addr_of_mut!((*crtc).head));
                     list_add_tail(
                         core::ptr::addr_of_mut!((*crtc).head),
                         core::ptr::addr_of_mut!((*dev).mode_config.crtc_list),
@@ -2807,8 +2806,8 @@ mod tests {
 
             let mut file: DrmFile = zeroed();
             file.event_space = 4096;
-            INIT_LIST_HEAD(core::ptr::addr_of_mut!(file.event_list));
-            INIT_LIST_HEAD(core::ptr::addr_of_mut!(file.pending_event_list));
+            init_list_head(core::ptr::addr_of_mut!(file.event_list));
+            init_list_head(core::ptr::addr_of_mut!(file.pending_event_list));
             drm_kapi::wait::init_waitqueue_head(&mut file.event_wait);
             let file_priv = &mut file as *mut DrmFile;
 

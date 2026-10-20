@@ -13,7 +13,7 @@ use core::{
 
 use drm_kapi::{
     assert::warn_on,
-    config::{EINVAL, IS_ERR, PTR_ERR},
+    config::{EINVAL, is_err, ptr_err},
     list::{list_move_tail, list_splice},
     locks::{spin_lock_irq_raw, spin_unlock_irq_raw},
     memory::kfree,
@@ -30,8 +30,8 @@ use crate::{
     drm_framebuffer_types::DrmFramebuffer,
     drm_plane_types::{DrmPlane, DrmPlaneFuncs},
     uapi_drm_consts::{
-        DRM_FORMAT_ARGB8888, DRM_FORMAT_XRGB8888, DRM_MODE_CONNECTOR_DSI, DRM_MODE_CONNECTOR_LVDS,
-        DRM_MODE_CONNECTOR_eDP,
+        DRM_FORMAT_ARGB8888, DRM_FORMAT_XRGB8888, DRM_MODE_CONNECTOR_DSI, DRM_MODE_CONNECTOR_EDP,
+        DRM_MODE_CONNECTOR_LVDS,
     },
     uapi_drm_mode_types::DrmModeFbCmd2,
 };
@@ -162,7 +162,7 @@ pub unsafe extern "C" fn drm_helper_move_panel_connectors_to_head(dev: *mut DrmD
         // is protected against concurrent modification by `connector_list_lock`.
         let ct = unsafe { (*connector).connector_type } as u32;
         if ct == DRM_MODE_CONNECTOR_LVDS
-            || ct == DRM_MODE_CONNECTOR_eDP
+            || ct == DRM_MODE_CONNECTOR_EDP
             || ct == DRM_MODE_CONNECTOR_DSI
         {
             // SAFETY: `(*connector).head` is a valid node in `connector_list` and `pl` is the valid local
@@ -241,11 +241,11 @@ pub unsafe extern "C" fn drm_crtc_init(
             core::ptr::null(),
         )
     } as *mut DrmPlane;
-    if IS_ERR(primary) {
-        return PTR_ERR(primary);
+    if is_err(primary) {
+        return ptr_err(primary);
     }
 
-    // SAFETY: `primary` was successfully allocated above (verified by `!IS_ERR`), returning a uniquely owned,
+    // SAFETY: `primary` was successfully allocated above (verified by `!is_err`), returning a uniquely owned,
     // aligned, initialized `DrmPlane` pointer.
     unsafe { (*primary).format_default = true };
 
@@ -296,9 +296,9 @@ pub unsafe extern "C" fn drm_mode_config_helper_suspend(dev: *mut DrmDevice) -> 
     // SAFETY: `dev` is a valid, live `DrmDevice`; suspends in-kernel DRM clients (such as fbdev).
     unsafe { drm_client_dev_suspend(dev) };
     // SAFETY: `dev` is a valid `DrmDevice`; `drm_atomic_helper_suspend` allocates and returns
-    // an atomic commit state duplicating current display configuration, or an ERR_PTR on failure.
+    // an atomic commit state duplicating current display configuration, or an err_ptr on failure.
     let state = unsafe { drm_atomic_helper_suspend(dev) };
-    if IS_ERR(state) {
+    if is_err(state) {
         // SAFETY: Rollback on suspend failure: resumes in-kernel DRM clients on the valid `dev`.
         unsafe { drm_client_dev_resume(dev) };
         // SAFETY: `dev` is valid and non-null; re-checks `poll_enabled` to determine whether to restore polling.
@@ -306,7 +306,7 @@ pub unsafe extern "C" fn drm_mode_config_helper_suspend(dev: *mut DrmDevice) -> 
             // SAFETY: Re-enables KMS output polling work on rollback.
             unsafe { drm_kms_helper_poll_enable(dev) };
         }
-        return PTR_ERR(state);
+        return ptr_err(state);
     }
 
     // SAFETY: `dev` is valid and non-null; stores the successfully allocated `state` into `suspend_state`

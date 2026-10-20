@@ -16,7 +16,7 @@ use core::{
 
 use drm_kapi::{
     assert::warn_on,
-    config::{EINVAL, ENOENT, ENOMEM, ERR_PTR, GFP_KERNEL},
+    config::{EINVAL, ENOENT, ENOMEM, GFP_KERNEL, err_ptr},
     memory::{kfree, kzalloc},
     print::{DrmLogLevel, drm_log_at},
 };
@@ -427,12 +427,12 @@ pub unsafe extern "C" fn drm_gem_fb_create_with_funcs(
     unsafe {
         let fb = kzalloc(size_of::<DrmFramebuffer>(), GFP_KERNEL).cast::<DrmFramebuffer>();
         if fb.is_null() {
-            return ERR_PTR(-ENOMEM);
+            return err_ptr(-ENOMEM);
         }
         let ret = drm_gem_fb_init_with_funcs(dev, fb, file, info, mode_cmd, funcs);
         if ret != 0 {
             kfree(fb.cast::<c_void>());
-            return ERR_PTR(ret);
+            return err_ptr(ret);
         }
         fb
     }

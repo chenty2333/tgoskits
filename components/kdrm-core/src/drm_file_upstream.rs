@@ -5,8 +5,6 @@
 //! DRM file private data allocation, open/release lifecycle, pending event queue,
 //! event reservation, timestamped event delivery, and read/poll file operations.
 
-#![allow(non_snake_case)]
-
 use alloc::boxed::Box;
 use core::{
     ffi::{c_char, c_int, c_uint, c_void},
@@ -15,7 +13,7 @@ use core::{
 
 use drm_kapi::{
     config::{EAGAIN, EFAULT, EINVAL, ENODEV, ENOMEM},
-    list::{INIT_LIST_HEAD, list_add, list_add_tail, list_del, list_del_init, list_empty},
+    list::{init_list_head, list_add, list_add_tail, list_del, list_del_init, list_empty},
     locks::{
         spin_lock, spin_lock_init, spin_lock_irqsave_raw, spin_unlock, spin_unlock_irqrestore_raw,
     },
@@ -88,7 +86,7 @@ pub unsafe extern "C" fn drm_dev_needs_global_mutex(dev: *mut DrmDevice) -> bool
 /// # Safety
 ///
 /// `minor` must point to an initialized, live `DrmMinor` with a valid, non-null `dev` pointer.
-/// Returns a newly allocated `DrmFile` owning a reference to `minor->dev`, or an `ERR_PTR` on failure.
+/// Returns a newly allocated `DrmFile` owning a reference to `minor->dev`, or an `err_ptr` on failure.
 pub unsafe extern "C" fn drm_file_alloc(minor: *mut DrmMinor) -> *mut DrmFile {
     if minor.is_null() {
         return core::ptr::null_mut();
@@ -100,16 +98,22 @@ pub unsafe extern "C" fn drm_file_alloc(minor: *mut DrmMinor) -> *mut DrmFile {
 
         (*file_priv).client_id = CLIENT_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
         (*file_priv).minor = minor;
+        // Authentication belongs to the opening credentials, independently of
+        // whether this open becomes master. Initialize before the driver hook.
+        (*file_priv).authenticated.store(
+            drm_kapi::kernel_services::capable(drm_kapi::config::CAP_SYS_ADMIN),
+            Ordering::Relaxed,
+        );
         spin_lock_init(&mut (*file_priv).master_lookup_lock);
         crate::drm_mode_object_upstream::idr_init(core::ptr::addr_of_mut!((*file_priv).object_idr));
         spin_lock_init(&mut (*file_priv).table_lock);
 
-        INIT_LIST_HEAD(core::ptr::addr_of_mut!((*file_priv).fbs));
+        init_list_head(core::ptr::addr_of_mut!((*file_priv).fbs));
         mutex_init(core::ptr::addr_of_mut!((*file_priv).fbs_lock));
-        INIT_LIST_HEAD(core::ptr::addr_of_mut!((*file_priv).blobs));
+        init_list_head(core::ptr::addr_of_mut!((*file_priv).blobs));
         init_waitqueue_head(&mut (*file_priv).event_wait);
-        INIT_LIST_HEAD(core::ptr::addr_of_mut!((*file_priv).pending_event_list));
-        INIT_LIST_HEAD(core::ptr::addr_of_mut!((*file_priv).event_list));
+        init_list_head(core::ptr::addr_of_mut!((*file_priv).pending_event_list));
+        init_list_head(core::ptr::addr_of_mut!((*file_priv).event_list));
         (*file_priv).event_space = 4096;
         mutex_init(core::ptr::addr_of_mut!((*file_priv).event_read_lock));
 
@@ -462,7 +466,11 @@ pub unsafe extern "C" fn drm_file_update_pid(filp: *mut DrmFile) {
         return;
     }
     // SAFETY: filp is non-null and points to a valid DrmFile object.
-    if unsafe { (*filp).was_master } {}
+    if unsafe {
+        (*filp)
+            .was_master
+            .load(core::sync::atomic::Ordering::Relaxed)
+    } {}
 }
 
 // upstream: drivers/gpu/drm/drm_file.c drm_release_noglobal()

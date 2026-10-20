@@ -8,7 +8,6 @@
 
 // The Linux ports state the invariant of each C-ABI call once in the module
 // header, as the GT ports do; per-block SAFETY prose is not repeated.
-#![allow(non_snake_case)]
 
 use core::{
     ffi::c_void,
@@ -16,7 +15,7 @@ use core::{
 };
 
 use drm_kapi::{
-    config::{EDEADLK, ENOMEM, GFP_KERNEL, IS_ERR, PTR_ERR},
+    config::{EDEADLK, ENOMEM, GFP_KERNEL, is_err, ptr_err},
     types::ListHead,
 };
 
@@ -293,8 +292,8 @@ pub unsafe fn drm_atomic_helper_dirtyfb(
                     num_clips as usize * size_of::<DrmModeRect>(),
                     rects as *const c_void,
                 );
-                if IS_ERR(damage) {
-                    ret = PTR_ERR(damage);
+                if is_err(damage) {
+                    ret = ptr_err(damage);
                     damage = core::ptr::null_mut();
                     prep_ok = false;
                 }
@@ -322,8 +321,8 @@ pub unsafe fn drm_atomic_helper_dirtyfb(
                     }
 
                     let plane_state = drm_atomic_get_plane_state(state, plane);
-                    if IS_ERR(plane_state) {
-                        loop_ret = PTR_ERR(plane_state);
+                    if is_err(plane_state) {
+                        loop_ret = ptr_err(plane_state);
                         lock_failed = true;
                         return false; // goto out
                     }

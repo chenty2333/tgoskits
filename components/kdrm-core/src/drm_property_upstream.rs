@@ -7,8 +7,6 @@
 //! (create, lookup, replace, get/put, `GETBLOB`/`CREATEBLOB`/`DESTROYBLOB`),
 //! and the atomic-free `drm_property_change_valid_get()` / `_put()` pair.
 
-#![allow(non_snake_case)]
-
 use core::{
     ffi::{c_char, c_void},
     mem::{offset_of, size_of},
@@ -17,7 +15,7 @@ use core::{
 use drm_kapi::{
     assert::warn_on,
     config::{EFAULT, EINVAL, ENOENT, ENOMEM, EOPNOTSUPP, EPERM, GFP_KERNEL},
-    list::{INIT_LIST_HEAD, list_add_tail, list_del, list_del_init},
+    list::{init_list_head, list_add_tail, list_del, list_del_init},
     memory::{kfree, kvfree, kzalloc},
     mm_native::{copy_from_user_c, copy_to_user_c},
     types::{Kref, ListHead},
@@ -271,7 +269,7 @@ pub unsafe extern "C" fn drm_property_create(
 
         (*property).flags = flags;
         (*property).num_values = num_values as u32;
-        INIT_LIST_HEAD(core::ptr::addr_of_mut!((*property).enum_list));
+        init_list_head(core::ptr::addr_of_mut!((*property).enum_list));
 
         strscpy_pad((*property).name.as_mut_ptr(), name, DRM_PROP_NAME_LEN);
 
@@ -769,18 +767,18 @@ pub unsafe extern "C" fn drm_property_create_blob(
     // SAFETY: `length` is checked against 0 and overflow; `kzalloc` allocates contiguous memory for `DrmPropertyBlob` plus `length` payload bytes; `copy_nonoverlapping` safely copies `length` bytes from `data` into newly allocated `(*blob).data`; mode object registration and insertion into `property_blob_list` under `blob_lock` complete the setup.
     unsafe {
         if length == 0 || length > (i32::MAX as usize) - size_of::<DrmPropertyBlob>() {
-            return ERR_PTR_C(-EINVAL);
+            return err_ptr_c(-EINVAL);
         }
 
         let blob =
             kzalloc(size_of::<DrmPropertyBlob>() + length, GFP_KERNEL).cast::<DrmPropertyBlob>();
         if blob.is_null() {
-            return ERR_PTR_C(-ENOMEM);
+            return err_ptr_c(-ENOMEM);
         }
 
         // This must be explicitly initialised, so we can safely call list_del
         // on it in the error path.
-        INIT_LIST_HEAD(core::ptr::addr_of_mut!((*blob).head_file));
+        init_list_head(core::ptr::addr_of_mut!((*blob).head_file));
 
         (*blob).data = blob
             .cast::<u8>()
@@ -802,7 +800,7 @@ pub unsafe extern "C" fn drm_property_create_blob(
         );
         if ret != 0 {
             kvfree(blob.cast::<c_void>());
-            return ERR_PTR_C(-EINVAL);
+            return err_ptr_c(-EINVAL);
         }
 
         mutex_lock(core::ptr::addr_of_mut!((*dev).mode_config.blob_lock));
@@ -816,18 +814,18 @@ pub unsafe extern "C" fn drm_property_create_blob(
     }
 }
 
-/// `ERR_PTR()` in pointer form, as used by the blob constructors.
-fn ERR_PTR_C<T>(error: i32) -> *mut T {
-    drm_kapi::config::ERR_PTR::<T>(error)
+/// `err_ptr()` in pointer form, as used by the blob constructors.
+fn err_ptr_c<T>(error: i32) -> *mut T {
+    drm_kapi::config::err_ptr::<T>(error)
 }
 
-/// `PTR_ERR()`/`IS_ERR()` in pointer form.
-fn IS_ERR_C<T>(ptr: *mut T) -> bool {
-    drm_kapi::config::IS_ERR(ptr)
+/// `ptr_err()`/`is_err()` in pointer form.
+fn is_err_c<T>(ptr: *mut T) -> bool {
+    drm_kapi::config::is_err(ptr)
 }
 
-fn PTR_ERR_C<T>(ptr: *mut T) -> i32 {
-    drm_kapi::config::PTR_ERR(ptr)
+fn ptr_err_c<T>(ptr: *mut T) -> i32 {
+    drm_kapi::config::ptr_err(ptr)
 }
 
 // upstream: drm_property.c drm_property_blob_put()
@@ -936,8 +934,8 @@ pub unsafe extern "C" fn drm_property_replace_global_blob(
 
         if length != 0 && !data.is_null() {
             new_blob = drm_property_create_blob(dev, length, data);
-            if IS_ERR_C(new_blob) {
-                return PTR_ERR_C(new_blob);
+            if is_err_c(new_blob) {
+                return ptr_err_c(new_blob);
             }
         }
 
@@ -1132,8 +1130,8 @@ pub unsafe extern "C" fn drm_mode_createblob_ioctl(
         }
 
         let blob = drm_property_create_blob(dev, (*out_resp).length as usize, core::ptr::null());
-        if IS_ERR_C(blob) {
-            return PTR_ERR_C(blob);
+        if is_err_c(blob) {
+            return ptr_err_c(blob);
         }
 
         if copy_from_user_c(
@@ -1430,7 +1428,7 @@ mod tests {
         // SAFETY: `t` provides a valid stack-allocated `TestDrm` fixture; `payload` is a valid stack byte array; tests blob creation, inspection, refcounting, and destruction.
         unsafe {
             let blob = drm_property_create_blob(dev, payload.len(), payload.as_ptr().cast());
-            assert!(!IS_ERR_C(blob));
+            assert!(!is_err_c(blob));
             assert_eq!((*blob).length, 4);
             assert_eq!(
                 core::slice::from_raw_parts((*blob).data.cast::<u8>(), 4),
@@ -1459,8 +1457,8 @@ mod tests {
         // SAFETY: `t` provides a valid stack-allocated `TestDrm` fixture; tests rejection and error code on a 0-length payload with null data pointer.
         unsafe {
             let blob = drm_property_create_blob(dev, 0, core::ptr::null());
-            assert!(IS_ERR_C(blob));
-            assert_eq!(PTR_ERR_C(blob), -EINVAL);
+            assert!(is_err_c(blob));
+            assert_eq!(ptr_err_c(blob), -EINVAL);
         }
     }
 }

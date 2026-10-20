@@ -4,8 +4,6 @@
 // Linux 7.2.3 configuration values and errno/GFP/PAGE constants used by DRM.
 // These values are architecture-neutral in the supported 64-bit kernel ABIs.
 
-#![allow(non_snake_case, non_upper_case_globals)]
-
 pub const CONFIG_PM: bool = true;
 pub const CONFIG_LOCKDEP: bool = false;
 pub const CONFIG_DEBUG_MUTEXES: bool = false;
@@ -55,24 +53,20 @@ pub const ENOENT: i32 = 2;
 pub const ENXIO: i32 = 6;
 pub const ERANGE: i32 = 34;
 pub const ENOSPC: i32 = 28;
-#[allow(non_snake_case)]
-pub const fn IS_ENABLED(enabled: bool) -> bool {
+pub const fn is_enabled(enabled: bool) -> bool {
     enabled
 }
-#[allow(non_snake_case)]
-pub fn IS_ERR<T>(pointer: *const T) -> bool {
+pub fn is_err<T>(pointer: *const T) -> bool {
     pointer as usize >= usize::MAX - 4094
 }
-#[allow(non_snake_case)]
-pub fn PTR_ERR<T>(pointer: *const T) -> i32 {
+pub fn ptr_err<T>(pointer: *const T) -> i32 {
     pointer as isize as i32
 }
-/// `PTR_ERR_OR_ZERO()` from include/linux/err.h.
+/// `ptr_err_or_zero()` from include/linux/err.h.
 #[inline]
-pub fn PTR_ERR_OR_ZERO<T>(pointer: *const T) -> i32 {
-    if IS_ERR(pointer) { PTR_ERR(pointer) } else { 0 }
+pub fn ptr_err_or_zero<T>(pointer: *const T) -> i32 {
+    if is_err(pointer) { ptr_err(pointer) } else { 0 }
 }
-#[allow(non_snake_case)]
-pub fn ERR_PTR<T>(error: i32) -> *mut T {
+pub fn err_ptr<T>(error: i32) -> *mut T {
     error as isize as usize as *mut T
 }

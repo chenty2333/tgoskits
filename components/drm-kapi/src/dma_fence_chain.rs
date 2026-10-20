@@ -142,7 +142,7 @@ pub unsafe extern "C" fn dma_fence_chain_init(
                 prev: ptr::null_mut(),
             }),
         };
-        crate::list::INIT_LIST_HEAD(ptr::addr_of_mut!((*base).timestamp_union.cb_list).cast());
+        crate::list::init_list_head(ptr::addr_of_mut!((*base).timestamp_union.cb_list).cast());
         (*base).context = context;
         (*base).seqno = seqno;
         (*base).flags = (1 << SEQNO64_FLAG_BIT) | (1 << DMA_FENCE_FLAG_INLINE_LOCK_BIT);

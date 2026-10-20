@@ -2,15 +2,13 @@
 // Copyright 2026 TheKernel contributors. See ../LICENSE-MIT.
 //! Port of Linux `drivers/gpu/drm/drm_client_modeset.c`.
 
-#![allow(non_snake_case, non_upper_case_globals)]
-
 use alloc::{vec, vec::Vec};
 use core::mem::offset_of;
 
 #[cfg(not(test))]
 use drm_kapi::mutex::{mutex_destroy, mutex_init, mutex_lock, mutex_unlock};
 use drm_kapi::{
-    config::{EINVAL, ENOMEM, IS_ERR, PTR_ERR},
+    config::{EINVAL, ENOMEM, is_err, ptr_err},
     memory::{kfree, kzalloc_objs},
 };
 #[cfg(test)]
@@ -1047,8 +1045,8 @@ unsafe fn drm_client_modeset_commit_atomic(
             // SAFETY: state and plane are valid DRM objects.
             let plane_state =
                 unsafe { crate::drm_atomic_upstream::drm_atomic_get_plane_state(state, plane) };
-            if IS_ERR(plane_state) {
-                ret = PTR_ERR(plane_state);
+            if is_err(plane_state) {
+                ret = ptr_err(plane_state);
                 break;
             }
             // SAFETY: plane_state is a valid non-error pointer.

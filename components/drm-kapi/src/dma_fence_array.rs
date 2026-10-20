@@ -68,7 +68,7 @@ unsafe fn init_container_fence(
                 prev: ptr::null_mut(),
             }),
         };
-        crate::list::INIT_LIST_HEAD(ptr::addr_of_mut!((*fence).timestamp_union.cb_list).cast());
+        crate::list::init_list_head(ptr::addr_of_mut!((*fence).timestamp_union.cb_list).cast());
         (*fence).context = context;
         (*fence).seqno = seqno;
         (*fence).flags = 1 << DMA_FENCE_FLAG_INLINE_LOCK_BIT;

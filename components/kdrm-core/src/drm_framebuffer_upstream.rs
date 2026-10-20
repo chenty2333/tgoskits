@@ -25,8 +25,8 @@ use core::{
 use drm_kapi::{
     assert::warn_on,
     config::{
-        EDEADLK, EFAULT, EINVAL, ENODEV, ENOENT, ENOMEM, ENOSPC, EOPNOTSUPP, ERANGE, ERR_PTR,
-        IS_ERR, PTR_ERR,
+        EDEADLK, EFAULT, EINVAL, ENODEV, ENOENT, ENOMEM, ENOSPC, EOPNOTSUPP, ERANGE, err_ptr,
+        is_err, ptr_err,
     },
 };
 
@@ -480,7 +480,7 @@ fn dbg_kms(dev: *const DrmDevice, msg: &str) {
 /// - `r` must point to a valid, readable `DrmModeFbCmd2` command struct.
 /// - `file_priv` must point to a live `DrmFile` owning the handles specified in `r`.
 ///
-/// On success, returns a newly referenced `DrmFramebuffer` pointer; on failure, returns an ERR_PTR.
+/// On success, returns a newly referenced `DrmFramebuffer` pointer; on failure, returns an err_ptr.
 pub unsafe extern "C" fn drm_internal_framebuffer_create(
     dev: *mut DrmDevice,
     r: *const DrmModeFbCmd2,
@@ -493,7 +493,7 @@ pub unsafe extern "C" fn drm_internal_framebuffer_create(
 
     if rr.flags & !(DRM_MODE_FB_INTERLACED | DRM_MODE_FB_MODIFIERS) != 0 {
         dbg_kms(dev, &format!("bad framebuffer flags 0x{:08x}", rr.flags));
-        return ERR_PTR(-EINVAL);
+        return err_ptr(-EINVAL);
     }
 
     // SAFETY: `config` is valid; read min/max width and height constraints.
@@ -508,7 +508,7 @@ pub unsafe extern "C" fn drm_internal_framebuffer_create(
                     (*config).max_width
                 ),
             );
-            return ERR_PTR(-EINVAL);
+            return err_ptr(-EINVAL);
         }
         if (*config).min_height > rr.height || rr.height > (*config).max_height {
             dbg_kms(
@@ -520,14 +520,14 @@ pub unsafe extern "C" fn drm_internal_framebuffer_create(
                     (*config).max_height
                 ),
             );
-            return ERR_PTR(-EINVAL);
+            return err_ptr(-EINVAL);
         }
     }
 
     // SAFETY: `config` is valid; check `fb_modifiers_not_supported` flag.
     if rr.flags & DRM_MODE_FB_MODIFIERS != 0 && unsafe { (*config).fb_modifiers_not_supported } {
         dbg_kms(dev, "driver does not support fb modifiers");
-        return ERR_PTR(-EINVAL);
+        return err_ptr(-EINVAL);
     }
 
     if __drm_format_info(rr.pixel_format).is_null() {
@@ -535,7 +535,7 @@ pub unsafe extern "C" fn drm_internal_framebuffer_create(
             dev,
             &format!("bad framebuffer format {:#010x}", rr.pixel_format),
         );
-        return ERR_PTR(-EINVAL);
+        return err_ptr(-EINVAL);
     }
 
     // SAFETY: `dev` is valid; look up format info for pixel format and modifier.
@@ -543,7 +543,7 @@ pub unsafe extern "C" fn drm_internal_framebuffer_create(
     // SAFETY: Validate framebuffer dimensions, pitches, and modifiers against format info.
     let ret = unsafe { framebuffer_check(dev, info, r) };
     if ret != 0 {
-        return ERR_PTR(ret);
+        return err_ptr(ret);
     }
 
     // SAFETY: `config` is valid; read driver `fb_create` function pointer.
@@ -557,7 +557,7 @@ pub unsafe extern "C" fn drm_internal_framebuffer_create(
             r as *mut DrmModeFbCmd2,
         )
     };
-    if IS_ERR(fb) {
+    if is_err(fb) {
         dbg_kms(dev, "could not create framebuffer");
         return fb;
     }
@@ -584,8 +584,8 @@ pub unsafe extern "C" fn drm_mode_addfb2(
     let r = data as *mut DrmModeFbCmd2;
     // SAFETY: Create internal framebuffer object from `r`.
     let fb = unsafe { drm_internal_framebuffer_create(dev, r, file_priv) };
-    if IS_ERR(fb) {
-        return PTR_ERR(fb);
+    if is_err(fb) {
+        return ptr_err(fb);
     }
 
     // SAFETY: `fb` is a valid pointer to newly created framebuffer; read its ID.
@@ -1317,7 +1317,7 @@ unsafe fn drm_framebuffer_init_err(fb: *mut DrmFramebuffer, num_planes: u32, ret
     ret
 }
 
-// INIT_LIST_HEAD()
+// init_list_head()
 #[inline]
 /// # Safety
 ///
@@ -1478,8 +1478,8 @@ unsafe fn atomic_remove_fb(fb: *mut DrmFramebuffer) -> i32 {
                 );
                 // SAFETY: Get or create atomic plane state for `plane`.
                 let plane_state = unsafe { drm_atomic_get_plane_state(state, plane) };
-                if IS_ERR(plane_state) {
-                    ret = PTR_ERR(plane_state);
+                if is_err(plane_state) {
+                    ret = ptr_err(plane_state);
                     bail = true;
                     break;
                 }

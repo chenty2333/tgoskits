@@ -10,7 +10,7 @@ use ax_gpu::{
     rdif_display::{DisplayError, DisplayState, Framebuffer, Mode, OutputId, Rect, ScanoutBuffer},
     rdif_gpu::{Completion, PixelFormat},
 };
-use drm_kapi::config::ERR_PTR;
+use drm_kapi::config::err_ptr;
 use kdrm_core::{
     drm_atomic_helper_upstream::{
         drm_atomic_helper_check, drm_atomic_helper_commit_error, drm_atomic_helper_commit_tail,
@@ -95,7 +95,7 @@ pub(crate) unsafe extern "C" fn fb_create(
     // SAFETY: The DRM core passes live pointers for the duration of the
     // callback; drm_gem_fb_create only reads both argument structures.
     let Some(format_info) = (unsafe { format.as_ref() }) else {
-        return ERR_PTR::<DrmFramebuffer>(NEG_EINVAL);
+        return err_ptr::<DrmFramebuffer>(NEG_EINVAL);
     };
     let pixel_format = match pixel_format_from_fourcc(format_info.format) {
         Some(format) => format,

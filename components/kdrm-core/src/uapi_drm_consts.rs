@@ -7,7 +7,6 @@
 //! (`#define` expression evaluation, not transcription). Function-like
 //! macros are in `uapi_drm_macros`. Type: `u32` when the value fits, else
 //! `u64` (fourcc modifiers and the invalid-modifier sentinel).
-#![allow(non_upper_case_globals)]
 
 pub const DRM_MIN_ORDER: u32 = 5;
 pub const DRM_MAX_ORDER: u32 = 22;
@@ -259,21 +258,21 @@ pub const DRM_MODE_ENCODER_VIRTUAL: u32 = 5;
 pub const DRM_MODE_ENCODER_DSI: u32 = 6;
 pub const DRM_MODE_ENCODER_DPMST: u32 = 7;
 pub const DRM_MODE_ENCODER_DPI: u32 = 8;
-pub const DRM_MODE_CONNECTOR_Unknown: u32 = 0;
+pub const DRM_MODE_CONNECTOR_UNKNOWN: u32 = 0;
 pub const DRM_MODE_CONNECTOR_VGA: u32 = 1;
 pub const DRM_MODE_CONNECTOR_DVII: u32 = 2;
 pub const DRM_MODE_CONNECTOR_DVID: u32 = 3;
 pub const DRM_MODE_CONNECTOR_DVIA: u32 = 4;
-pub const DRM_MODE_CONNECTOR_Composite: u32 = 5;
+pub const DRM_MODE_CONNECTOR_COMPOSITE: u32 = 5;
 pub const DRM_MODE_CONNECTOR_SVIDEO: u32 = 6;
 pub const DRM_MODE_CONNECTOR_LVDS: u32 = 7;
-pub const DRM_MODE_CONNECTOR_Component: u32 = 8;
-pub const DRM_MODE_CONNECTOR_9PinDIN: u32 = 9;
-pub const DRM_MODE_CONNECTOR_DisplayPort: u32 = 10;
+pub const DRM_MODE_CONNECTOR_COMPONENT: u32 = 8;
+pub const DRM_MODE_CONNECTOR_9PINDIN: u32 = 9;
+pub const DRM_MODE_CONNECTOR_DISPLAYPORT: u32 = 10;
 pub const DRM_MODE_CONNECTOR_HDMIA: u32 = 11;
 pub const DRM_MODE_CONNECTOR_HDMIB: u32 = 12;
 pub const DRM_MODE_CONNECTOR_TV: u32 = 13;
-pub const DRM_MODE_CONNECTOR_eDP: u32 = 14;
+pub const DRM_MODE_CONNECTOR_EDP: u32 = 14;
 pub const DRM_MODE_CONNECTOR_VIRTUAL: u32 = 15;
 pub const DRM_MODE_CONNECTOR_DSI: u32 = 16;
 pub const DRM_MODE_CONNECTOR_DPI: u32 = 17;

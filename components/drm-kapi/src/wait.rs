@@ -13,7 +13,7 @@ use core::{
 use crate::{
     config::{CONFIG_HZ, EAGAIN, ENODEV, MAX_SCHEDULE_TIMEOUT},
     kernel_services::ProviderSlot,
-    list::{INIT_LIST_HEAD, list_add_tail, list_del_init, list_empty},
+    list::{init_list_head, list_add_tail, list_del_init, list_empty},
     locks::{spin_lock_irqsave, spin_unlock_irqrestore},
     types::{WaitQueueEntry, WaitQueueHead},
 };
@@ -292,7 +292,7 @@ pub type WaitQueueFunc = unsafe extern "C" fn(*mut WaitQueueEntry, u32, i32, *mu
 
 pub fn init_waitqueue_head(head: &mut WaitQueueHead) {
     // SAFETY: head.head is a valid mutable reference to ListHead; addr_of_mut produces an aligned pointer.
-    unsafe { INIT_LIST_HEAD(core::ptr::addr_of_mut!(head.head)) };
+    unsafe { init_list_head(core::ptr::addr_of_mut!(head.head)) };
 }
 
 pub fn add_wait_queue(head: &mut WaitQueueHead, entry: &mut WaitQueueEntry) {
@@ -321,6 +321,10 @@ pub fn wake_up(head: &mut WaitQueueHead) {
 }
 
 pub fn wake_up_all(head: &mut WaitQueueHead) {
+    wake_up_key(head, core::ptr::null_mut());
+}
+
+fn wake_up_key(head: &mut WaitQueueHead, key: *mut c_void) {
     let mut flags = 0u64;
     spin_lock_irqsave(&mut head.lock, &mut flags);
     // SAFETY: head.lock is held, preventing concurrent modification; head.head.next is an initialized list pointer.
@@ -336,7 +340,7 @@ pub fn wake_up_all(head: &mut WaitQueueHead) {
         // SAFETY: entry is calculated from container_of (offset_of) on a valid node and points to an aligned WaitQueueEntry.
         if let Some(wake) = unsafe { (*entry).func } {
             // SAFETY: wake is a valid function pointer called with entry while head.lock is held.
-            unsafe { wake(entry, u32::MAX, 0, core::ptr::null_mut()) };
+            unsafe { wake(entry, u32::MAX, 0, key) };
         }
         node = next;
     }
@@ -700,8 +704,9 @@ pub unsafe fn poll_wait(
 
 /// Linux `wake_up_interruptible_poll()`.
 #[inline]
-pub fn wake_up_interruptible_poll(head: &mut WaitQueueHead, _key: u32) {
-    wake_up_all(head);
+pub fn wake_up_interruptible_poll(head: &mut WaitQueueHead, key: u32) {
+    // Linux encodes the event mask in the pointer value; it is never dereferenced.
+    wake_up_key(head, key as usize as *mut c_void);
 }
 
 /// Linux `wait_event_interruptible_locked()` macro.
@@ -938,7 +943,7 @@ pub unsafe extern "C" fn init_wait_entry(wq_entry: *mut WaitQueueEntry, flags: i
             (*wq_entry).flags = flags as u32;
             (*wq_entry).private = current_task_key() as *mut c_void;
             (*wq_entry).func = Some(default_wake_function);
-            INIT_LIST_HEAD(core::ptr::addr_of_mut!((*wq_entry).entry));
+            init_list_head(core::ptr::addr_of_mut!((*wq_entry).entry));
         }
     }
 }
@@ -983,7 +988,7 @@ pub unsafe extern "C" fn prepare_to_wait_event(
         // SAFETY: wq_head.lock is held; wq_entry and wq_head point to valid initialized queue structures.
         unsafe {
             if (*wq_entry).entry.next.is_null() {
-                INIT_LIST_HEAD(core::ptr::addr_of_mut!((*wq_entry).entry));
+                init_list_head(core::ptr::addr_of_mut!((*wq_entry).entry));
             }
             if list_empty(&(*wq_entry).entry) {
                 if (*wq_entry).flags & WQ_FLAG_EXCLUSIVE != 0 {
@@ -1021,7 +1026,7 @@ pub unsafe extern "C" fn do_wait_intr(
     // SAFETY: wait and wq are non-null and live; caller holds wq.lock.
     unsafe {
         if (*wait).entry.next.is_null() {
-            INIT_LIST_HEAD(core::ptr::addr_of_mut!((*wait).entry));
+            init_list_head(core::ptr::addr_of_mut!((*wait).entry));
         }
         if list_empty(&(*wait).entry) {
             list_add_tail(
@@ -1058,7 +1063,7 @@ pub unsafe extern "C" fn do_wait_intr_irq(
     // SAFETY: wait and wq are non-null and live; caller holds wq.lock with irqs disabled.
     unsafe {
         if (*wait).entry.next.is_null() {
-            INIT_LIST_HEAD(core::ptr::addr_of_mut!((*wait).entry));
+            init_list_head(core::ptr::addr_of_mut!((*wait).entry));
         }
         if list_empty(&(*wait).entry) {
             list_add_tail(
@@ -1099,6 +1104,31 @@ mod tests {
     use core::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
+
+    #[test]
+    fn poll_wake_preserves_the_notification_key() {
+        unsafe extern "C" fn capture(
+            entry: *mut WaitQueueEntry,
+            _mode: u32,
+            _sync: i32,
+            key: *mut c_void,
+        ) -> i32 {
+            // SAFETY: The test keeps the registered entry and its output live.
+            unsafe { *(*entry).private.cast::<usize>() = key as usize };
+            1
+        }
+        let mut seen = 0usize;
+        // SAFETY: Zeroed queue and entry storage is initialized before use.
+        let mut head: WaitQueueHead = unsafe { core::mem::zeroed() };
+        let mut entry: WaitQueueEntry = unsafe { core::mem::zeroed() };
+        init_waitqueue_head(&mut head);
+        entry.func = Some(capture);
+        entry.private = core::ptr::addr_of_mut!(seen).cast();
+        add_wait_queue(&mut head, &mut entry);
+        wake_up_interruptible_poll(&mut head, 0x18); // EPOLLERR | EPOLLHUP
+        remove_wait_queue(&mut head, &mut entry);
+        assert_eq!(seen, 0x18);
+    }
 
     #[test]
     fn wait_until_ready_reports_a_transient_condition_clearing() {

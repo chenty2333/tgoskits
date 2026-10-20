@@ -20,7 +20,7 @@ use kdrm_core::{
     drm_prime_upstream::{DmaBuf, DmaBufAttachment, DmaBufExportInfo, DmaBufOps},
 };
 use drm_kapi::{
-    config::{ERR_PTR, GFP_KERNEL, IS_ERR},
+    config::{err_ptr, GFP_KERNEL, is_err},
     memory::{kfree, kmalloc},
     shmem::{self, File as LinuxKpiFile},
     types::{Scatterlist, SgTable},
@@ -108,7 +108,7 @@ impl DmaBufFile {
             };
             // SAFETY: `info` points to a stack-allocated `DmaBufExportInfo` whose fields and ops are initialized and live.
             let dma_buf = unsafe { dma_buf_export(&info) };
-            if dma_buf.is_null() || IS_ERR(dma_buf) {
+            if dma_buf.is_null() || is_err(dma_buf) {
                 // Export did not take ownership unless it returned a live
                 // dma_buf; its release callback therefore has not run.
                 // SAFETY: `dma_buf_export` failed and did not take ownership; restoring `Box` frees the allocated owner.
@@ -117,7 +117,7 @@ impl DmaBufFile {
             }
             // SAFETY: `dma_buf` is a valid, live `DmaBuf` pointer returned by `dma_buf_export`.
             let file = unsafe { (*dma_buf).file.cast::<LinuxKpiFile>() };
-            if file.is_null() || IS_ERR(file) {
+            if file.is_null() || is_err(file) {
                 // SAFETY: `dma_buf` is valid; drops our reference since `file` extraction failed.
                 unsafe { kdrm_core::drm_dma_buf_upstream::dma_buf_put(dma_buf) };
                 return ptr::null_mut();
@@ -185,26 +185,26 @@ unsafe extern "C" fn starry_dmabuf_map(
     _direction: i32,
 ) -> *mut SgTable {
     if attachment.is_null() {
-        return ERR_PTR(-drm_kapi::config::EINVAL);
+        return err_ptr(-drm_kapi::config::EINVAL);
     }
     // SAFETY: dma_buf_map_attachment invokes this callback with a live
     // DmaBufAttachment owned by the DMA-BUF core.
     let dma_buf = unsafe { (*attachment).dmabuf };
     // SAFETY: `dma_buf` is non-null and valid, accessing `r#priv` field.
     if dma_buf.is_null() || unsafe { (*dma_buf).r#priv.is_null() } {
-        return ERR_PTR(-drm_kapi::config::EINVAL);
+        return err_ptr(-drm_kapi::config::EINVAL);
     }
     // SAFETY: `r#priv` was verified non-null and points to the live `StarryDmaBufExport` installed during export.
     let owner = unsafe { &*(*dma_buf).r#priv.cast::<StarryDmaBufExport>() };
     let Ok(length) = u32::try_from(owner.alloc.size) else {
-        return ERR_PTR(-drm_kapi::config::EOPNOTSUPP);
+        return err_ptr(-drm_kapi::config::EOPNOTSUPP);
     };
     let Some(total) = size_of::<SgTable>().checked_add(size_of::<Scatterlist>()) else {
-        return ERR_PTR(-drm_kapi::config::ENOMEM);
+        return err_ptr(-drm_kapi::config::ENOMEM);
     };
     let allocation = kmalloc(total, GFP_KERNEL);
     if allocation.is_null() {
-        return ERR_PTR(-drm_kapi::config::ENOMEM);
+        return err_ptr(-drm_kapi::config::ENOMEM);
     }
     let table = allocation.cast::<SgTable>();
     // SAFETY: `allocation` was checked non-null with size >= size_of::<SgTable>() + size_of::<Scatterlist>();
@@ -244,7 +244,7 @@ unsafe extern "C" fn starry_dmabuf_unmap(
     table: *mut SgTable,
     _direction: i32,
 ) {
-    if !table.is_null() && !IS_ERR(table) {
+    if !table.is_null() && !is_err(table) {
         // SAFETY: `table` was allocated via `kmalloc` in `starry_dmabuf_map` and has not been freed.
         unsafe { kfree(table.cast::<c_void>()) };
     }

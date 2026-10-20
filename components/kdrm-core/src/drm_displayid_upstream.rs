@@ -12,7 +12,7 @@ use core::{
 
 use drm_kapi::{
     assert::warn_on,
-    config::{EINVAL, ERR_PTR, IS_ERR},
+    config::{EINVAL, err_ptr, is_err},
     print::{DrmLogLevel, drm_log_at},
 };
 
@@ -84,7 +84,7 @@ unsafe fn displayid_get_header(
     index: i32,
 ) -> *const DisplayidHeader {
     if (size_of::<DisplayidHeader>() as i64) > (length - index) as i64 {
-        return ERR_PTR::<DisplayidHeader>(-EINVAL) as *const DisplayidHeader;
+        return err_ptr::<DisplayidHeader>(-EINVAL) as *const DisplayidHeader;
     }
     // SAFETY: Verified that `length - index >= size_of::<DisplayidHeader>()`, so adding `index`
     // yields a pointer within the caller's allocated `displayid` buffer.
@@ -103,7 +103,7 @@ pub(crate) unsafe fn validate_displayid(
 ) -> *const DisplayidHeader {
     // SAFETY: `displayid` has `length` readable bytes; index bounds are checked in `displayid_get_header`.
     let base = unsafe { displayid_get_header(displayid, length, idx) };
-    if IS_ERR(base) {
+    if is_err(base) {
         return base;
     }
 
@@ -111,7 +111,7 @@ pub(crate) unsafe fn validate_displayid(
     let base_ref = unsafe { &*base };
     let dispid_length = size_of::<DisplayidHeader>() as i32 + base_ref.bytes as i32 + 1;
     if dispid_length > length - idx {
-        return ERR_PTR::<DisplayidHeader>(-EINVAL) as *const DisplayidHeader;
+        return err_ptr::<DisplayidHeader>(-EINVAL) as *const DisplayidHeader;
     }
 
     let mut csum: u8 = 0;
@@ -132,7 +132,7 @@ pub(crate) unsafe fn validate_displayid(
             ),
         );
         if !ignore_checksum {
-            return ERR_PTR::<DisplayidHeader>(-EINVAL) as *const DisplayidHeader;
+            return err_ptr::<DisplayidHeader>(-EINVAL) as *const DisplayidHeader;
         }
     }
 
@@ -159,7 +159,7 @@ unsafe fn find_next_displayid_extension(iter: *mut DisplayidIter) -> *const u8 {
 
     // SAFETY: `displayid` points to the extension payload of `EDID_LENGTH - 1` bytes.
     let base = unsafe { validate_displayid(displayid, iter.length, iter.idx, ignore_checksum) };
-    if IS_ERR(base) {
+    if is_err(base) {
         return core::ptr::null();
     }
 
@@ -259,7 +259,7 @@ pub unsafe extern "C" fn __displayid_iter_next(iter: *mut DisplayidIter) -> *con
             let (length, idx) = unsafe { ((*iter).length, (*iter).idx) };
             // SAFETY: `section` points to valid extension data of `length` bytes.
             let base = unsafe { displayid_get_header(section, length, idx) };
-            if !IS_ERR(base) {
+            if !is_err(base) {
                 // SAFETY: `base` is valid; extracts `rev` and `prod_id`.
                 unsafe {
                     (*iter).version = (*base).rev;

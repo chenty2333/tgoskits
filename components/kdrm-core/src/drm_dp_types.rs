@@ -6,16 +6,15 @@
 // size and field offset is pinned by a compile-time assertion.
 //! Linux DRM type definitions. Source headers:
 //! `include/drm/display/drm_dp.h`
-#![allow(non_camel_case_types, non_upper_case_globals, non_snake_case)]
 
 use core::mem::size_of;
 
 #[repr(C)]
 pub struct DpSdpHeader {
-    pub HB0: u8,
-    pub HB1: u8,
-    pub HB2: u8,
-    pub HB3: u8,
+    pub hb0: u8,
+    pub hb1: u8,
+    pub hb2: u8,
+    pub hb3: u8,
 }
 
 #[repr(C)]
@@ -67,10 +66,10 @@ pub const DP_AS_SDP_FAVT_TRR_NOT_REACHED: OperationMode = 2;
 pub const DP_AS_SDP_FAVT_TRR_REACHED: OperationMode = 3;
 
 const _: () = assert!(size_of::<DpSdpHeader>() == 4);
-const _: () = assert!(core::mem::offset_of!(DpSdpHeader, HB0) == 0);
-const _: () = assert!(core::mem::offset_of!(DpSdpHeader, HB1) == 1);
-const _: () = assert!(core::mem::offset_of!(DpSdpHeader, HB2) == 2);
-const _: () = assert!(core::mem::offset_of!(DpSdpHeader, HB3) == 3);
+const _: () = assert!(core::mem::offset_of!(DpSdpHeader, hb0) == 0);
+const _: () = assert!(core::mem::offset_of!(DpSdpHeader, hb1) == 1);
+const _: () = assert!(core::mem::offset_of!(DpSdpHeader, hb2) == 2);
+const _: () = assert!(core::mem::offset_of!(DpSdpHeader, hb3) == 3);
 const _: () = assert!(size_of::<DpSdp>() == 36);
 const _: () = assert!(core::mem::offset_of!(DpSdp, sdp_header) == 0);
 const _: () = assert!(size_of::<DpSdpHeader>() == 4);

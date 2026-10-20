@@ -6,8 +6,6 @@
 // the Linux v7.2.3 x86_64 configuration; the layout assertions travel with the
 // records. These are pure kernel records with no GPU-driver dependency.
 
-#![allow(non_camel_case_types)]
-
 use core::{
     ffi::{c_char, c_uint, c_ulong, c_void},
     mem::ManuallyDrop,

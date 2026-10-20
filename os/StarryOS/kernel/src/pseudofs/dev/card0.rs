@@ -25,7 +25,7 @@ use kdrm_core::{
 };
 use drm_kapi::{
     config::EFAULT,
-    list::INIT_LIST_HEAD,
+    list::init_list_head,
     types::{File as LinuxFile, WaitQueueEntry},
     wait::{add_wait_queue, remove_wait_queue},
 };
@@ -287,7 +287,7 @@ impl Card0File {
             let entry = self.wait_entry.get();
             (*entry).private = (&self.poll as *const PollSet).cast_mut().cast();
             (*entry).func = Some(wake_poll_waiters);
-            INIT_LIST_HEAD(ptr::addr_of_mut!((*entry).entry));
+            init_list_head(ptr::addr_of_mut!((*entry).entry));
             add_wait_queue(&mut *ptr::addr_of_mut!((*private).event_wait), &mut *entry);
         }
         Ok(())
@@ -358,11 +358,11 @@ unsafe extern "C" fn copy_event_to_io_dst(
 
 /// # Safety
 /// If non-null, `entry` must point to a valid, live `WaitQueueEntry` whose `private` field points to a live `PollSet`.
-unsafe extern "C" fn wake_poll_waiters(
+pub(super) unsafe extern "C" fn wake_poll_waiters(
     entry: *mut WaitQueueEntry,
     _mode: u32,
     _sync: c_int,
-    _key: *mut c_void,
+    key: *mut c_void,
 ) -> c_int {
     if entry.is_null() {
         return 0;
@@ -374,16 +374,18 @@ unsafe extern "C" fn wake_poll_waiters(
         // ax-drm sends RDIF completion and synthetic-vblank notifications
         // from task/deferred context. A future hardware IRQ path must defer
         // before entering the common DRM event-send path.
-        // DRM's event queue wakeup means the read side may be ready.
+        // Unkeyed queue notifications are read readiness; keyed wakes also
+        // carry terminal ERR/HUP when the shared device is unplugged.
         // SAFETY: The embedded PollSet is pinned until this wait entry is
         // removed, and ax-drm invokes DRM event wakeups from task/deferred
         // context.
-        unsafe { (&*poll).wake_all(IoEvents::IN | IoEvents::RDNORM) };
+        let events = if key.is_null() { IoEvents::IN | IoEvents::RDNORM } else { linux_poll_events(key as usize as u32) };
+        unsafe { (&*poll).wake_all(events) };
     }
     1
 }
 
-fn linux_poll_events(mask: u32) -> IoEvents {
+pub(super) fn linux_poll_events(mask: u32) -> IoEvents {
     let mut events = IoEvents::empty();
     events.set(IoEvents::IN, mask & DRM_EPOLLIN != 0);
     events.set(IoEvents::OUT, mask & DRM_EPOLLOUT != 0);
@@ -506,10 +508,14 @@ impl FileLike for Card0File {
         // Card0File. The adapter retains its raw Linux file until Drop, and
         // this method keeps the FileLike borrow alive for the whole call.
         let lease = unsafe { ax_drm::mmap(private, offset, length) }.map_err(errno_from_linux)?;
-        Ok(DeviceMmap::PhysicalResolved(
-            lease.physical(),
-            Some(Arc::new(lease)),
-        ))
+        let range = lease.physical();
+        let cached = lease.cached();
+        let retainer = Some(Arc::new(lease) as Arc<dyn core::any::Any + Send + Sync>);
+        Ok(if cached {
+            DeviceMmap::PhysicalCachedResolved(range, retainer)
+        } else {
+            DeviceMmap::PhysicalResolved(range, retainer)
+        })
     }
 
     fn open_flags(&self) -> u32 {

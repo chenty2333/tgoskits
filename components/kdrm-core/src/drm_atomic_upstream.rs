@@ -2,14 +2,12 @@
 // Copyright 2026 TheKernel contributors. See ../LICENSE-MIT.
 //! Port of Linux `drivers/gpu/drm/drm_atomic.c`.
 
-#![allow(non_snake_case)]
-
 use alloc::format;
 use core::{ffi::c_void, mem::size_of};
 
 use drm_kapi::{
     config::{
-        EINVAL, ENOMEM, ENOSPC, EOPNOTSUPP, ERANGE, ETIMEDOUT, GFP_KERNEL, HZ, IS_ERR, PTR_ERR,
+        EINVAL, ENOMEM, ENOSPC, EOPNOTSUPP, ERANGE, ETIMEDOUT, GFP_KERNEL, HZ, is_err, ptr_err,
     },
     list::{list_add_tail, list_del},
     memory::{kfree, kref_init, kzalloc, kzalloc_objs},
@@ -910,7 +908,7 @@ pub unsafe extern "C" fn drm_atomic_get_crtc_state(
     crtc: *mut DrmCrtc,
 ) -> *mut DrmCrtcState {
     if state.is_null() || crtc.is_null() {
-        return drm_kapi::config::ERR_PTR(-EINVAL);
+        return drm_kapi::config::err_ptr(-EINVAL);
     }
 
     // SAFETY: `crtc` is verified non-null above and points to a valid `DrmCrtc`.
@@ -925,20 +923,20 @@ pub unsafe extern "C" fn drm_atomic_get_crtc_state(
     let ret =
         unsafe { drm_modeset_lock(core::ptr::addr_of_mut!((*crtc).mutex), (*state).acquire_ctx) };
     if ret != 0 {
-        return drm_kapi::config::ERR_PTR(ret);
+        return drm_kapi::config::err_ptr(ret);
     }
 
     // SAFETY: `crtc` is valid and its `funcs` pointer is accessible.
     let funcs = unsafe { (*crtc).funcs };
     // SAFETY: `funcs` was checked non-null.
     if funcs.is_null() || unsafe { (*funcs).atomic_duplicate_state.is_none() } {
-        return drm_kapi::config::ERR_PTR(-EINVAL);
+        return drm_kapi::config::err_ptr(-EINVAL);
     }
 
     // SAFETY: `atomic_duplicate_state` is non-null and `crtc` is a valid `DrmCrtc` pointer.
     let crtc_state = unsafe { ((*funcs).atomic_duplicate_state.unwrap())(crtc) };
     if crtc_state.is_null() {
-        return drm_kapi::config::ERR_PTR(-ENOMEM);
+        return drm_kapi::config::err_ptr(-ENOMEM);
     }
 
     unsafe {
@@ -1141,7 +1139,7 @@ pub unsafe extern "C" fn drm_atomic_get_plane_state(
     plane: *mut DrmPlane,
 ) -> *mut DrmPlaneState {
     if state.is_null() || plane.is_null() {
-        return drm_kapi::config::ERR_PTR(-EINVAL);
+        return drm_kapi::config::err_ptr(-EINVAL);
     }
 
     // SAFETY: `plane` was verified non-null above and points to a valid `DrmPlane`.
@@ -1160,20 +1158,20 @@ pub unsafe extern "C" fn drm_atomic_get_plane_state(
         )
     };
     if ret != 0 {
-        return drm_kapi::config::ERR_PTR(ret);
+        return drm_kapi::config::err_ptr(ret);
     }
 
     // SAFETY: `plane` is valid and its `funcs` pointer is accessible.
     let funcs = unsafe { (*plane).funcs };
     // SAFETY: `funcs` was checked non-null.
     if funcs.is_null() || unsafe { (*funcs).atomic_duplicate_state.is_none() } {
-        return drm_kapi::config::ERR_PTR(-EINVAL);
+        return drm_kapi::config::err_ptr(-EINVAL);
     }
 
     // SAFETY: `atomic_duplicate_state` is non-null and `plane` is a valid `DrmPlane` pointer.
     let plane_state = unsafe { ((*funcs).atomic_duplicate_state.unwrap())(plane) };
     if plane_state.is_null() {
-        return drm_kapi::config::ERR_PTR(-ENOMEM);
+        return drm_kapi::config::err_ptr(-ENOMEM);
     }
 
     unsafe {
@@ -1188,7 +1186,7 @@ pub unsafe extern "C" fn drm_atomic_get_plane_state(
 
         if !(*plane_state).crtc.is_null() {
             let crtc_state = drm_atomic_get_crtc_state(state, (*plane_state).crtc);
-            if IS_ERR(crtc_state) {
+            if is_err(crtc_state) {
                 return crtc_state.cast();
             }
         }
@@ -1549,8 +1547,8 @@ pub unsafe extern "C" fn drm_atomic_private_obj_init(
         // SAFETY: `funcs` was checked non-null above.
         if let Some(create_fn) = (*funcs).atomic_create_state {
             let state = create_fn(obj);
-            if IS_ERR(state) {
-                return PTR_ERR(state);
+            if is_err(state) {
+                return ptr_err(state);
             }
             (*obj).state = state;
         }
@@ -1597,7 +1595,7 @@ pub unsafe extern "C" fn drm_atomic_get_private_obj_state(
     obj: *mut DrmPrivateObj,
 ) -> *mut DrmPrivateState {
     if state.is_null() || obj.is_null() {
-        return drm_kapi::config::ERR_PTR(-EINVAL);
+        return drm_kapi::config::err_ptr(-EINVAL);
     }
 
     // SAFETY: `state` and `obj` are verified non-null above.
@@ -1610,7 +1608,7 @@ pub unsafe extern "C" fn drm_atomic_get_private_obj_state(
         // SAFETY: `obj.lock` is an initialized `DrmModesetLock` and `state.acquire_ctx` is valid.
         unsafe { drm_modeset_lock(core::ptr::addr_of_mut!((*obj).lock), (*state).acquire_ctx) };
     if ret != 0 {
-        return drm_kapi::config::ERR_PTR(ret);
+        return drm_kapi::config::err_ptr(ret);
     }
 
     // SAFETY: `state` is a valid `DrmAtomicCommit` pointer.
@@ -1621,7 +1619,7 @@ pub unsafe extern "C" fn drm_atomic_get_private_obj_state(
         krealloc((*state).private_objs as *mut c_void, size, GFP_KERNEL) as *mut DrmPrivateObjsState
     };
     if arr.is_null() {
-        return drm_kapi::config::ERR_PTR(-ENOMEM);
+        return drm_kapi::config::err_ptr(-ENOMEM);
     }
 
     unsafe {
@@ -1632,12 +1630,12 @@ pub unsafe extern "C" fn drm_atomic_get_private_obj_state(
 
         let funcs = (*obj).funcs;
         if funcs.is_null() || (*funcs).atomic_duplicate_state.is_none() {
-            return drm_kapi::config::ERR_PTR(-EINVAL);
+            return drm_kapi::config::err_ptr(-EINVAL);
         }
 
         let obj_state = ((*funcs).atomic_duplicate_state.unwrap())(obj);
         if obj_state.is_null() {
-            return drm_kapi::config::ERR_PTR(-ENOMEM);
+            return drm_kapi::config::err_ptr(-ENOMEM);
         }
 
         let entry = (*state).private_objs.add(index);
@@ -1836,12 +1834,12 @@ pub unsafe extern "C" fn drm_atomic_get_connector_for_encoder(
     ctx: *mut crate::drm_modeset_lock_types::DrmModesetAcquireCtx,
 ) -> *mut DrmConnector {
     if encoder.is_null() {
-        return drm_kapi::config::ERR_PTR(-EINVAL);
+        return drm_kapi::config::err_ptr(-EINVAL);
     }
     // SAFETY: `encoder` was verified non-null above and points to a valid `DrmEncoder`.
     let dev = unsafe { (*encoder).dev };
     if dev.is_null() {
-        return drm_kapi::config::ERR_PTR(-EINVAL);
+        return drm_kapi::config::err_ptr(-EINVAL);
     }
 
     // SAFETY: `dev` is non-null and points to an initialized `DrmDevice`.
@@ -1849,10 +1847,10 @@ pub unsafe extern "C" fn drm_atomic_get_connector_for_encoder(
     // SAFETY: `conn_mutex` is a valid pointer to `connection_mutex`, and `ctx` is an acquire context.
     let ret = unsafe { drm_modeset_lock(conn_mutex, ctx) };
     if ret != 0 {
-        return drm_kapi::config::ERR_PTR(ret);
+        return drm_kapi::config::err_ptr(ret);
     }
 
-    let mut out_connector: *mut DrmConnector = drm_kapi::config::ERR_PTR(-EINVAL);
+    let mut out_connector: *mut DrmConnector = drm_kapi::config::err_ptr(-EINVAL);
     let mut conn_iter = core::mem::MaybeUninit::<DrmConnectorListIter>::uninit();
 
     unsafe {
@@ -1942,7 +1940,7 @@ pub unsafe extern "C" fn drm_atomic_get_connector_state(
     connector: *mut DrmConnector,
 ) -> *mut DrmConnectorState {
     if state.is_null() || connector.is_null() {
-        return drm_kapi::config::ERR_PTR(-EINVAL);
+        return drm_kapi::config::err_ptr(-EINVAL);
     }
 
     // SAFETY: `connector` was verified non-null above, pointing to a valid `DrmConnector`.
@@ -1958,7 +1956,7 @@ pub unsafe extern "C" fn drm_atomic_get_connector_state(
         )
     };
     if ret != 0 {
-        return drm_kapi::config::ERR_PTR(ret);
+        return drm_kapi::config::err_ptr(ret);
     }
 
     // SAFETY: `connector` is non-null and valid.
@@ -1974,7 +1972,7 @@ pub unsafe extern "C" fn drm_atomic_get_connector_state(
                 as *mut DrmConnnectorsState
         };
         if c.is_null() {
-            return drm_kapi::config::ERR_PTR(-ENOMEM);
+            return drm_kapi::config::err_ptr(-ENOMEM);
         }
 
         unsafe {
@@ -1996,13 +1994,13 @@ pub unsafe extern "C" fn drm_atomic_get_connector_state(
     let funcs = unsafe { (*connector).funcs };
     // SAFETY: `funcs` was checked non-null.
     if funcs.is_null() || unsafe { (*funcs).atomic_duplicate_state.is_none() } {
-        return drm_kapi::config::ERR_PTR(-EINVAL);
+        return drm_kapi::config::err_ptr(-EINVAL);
     }
 
     // SAFETY: `atomic_duplicate_state` hook is non-null and `connector` is valid.
     let connector_state = unsafe { ((*funcs).atomic_duplicate_state.unwrap())(connector) };
     if connector_state.is_null() {
-        return drm_kapi::config::ERR_PTR(-ENOMEM);
+        return drm_kapi::config::err_ptr(-ENOMEM);
     }
 
     unsafe {
@@ -2018,7 +2016,7 @@ pub unsafe extern "C" fn drm_atomic_get_connector_state(
 
         if !(*connector_state).crtc.is_null() {
             let crtc_state = drm_atomic_get_crtc_state(state, (*connector_state).crtc);
-            if IS_ERR(crtc_state) {
+            if is_err(crtc_state) {
                 return crtc_state.cast();
             }
         }
@@ -2110,8 +2108,8 @@ pub unsafe extern "C" fn drm_atomic_add_affected_connectors(
 
     // SAFETY: `state` and `crtc` are non-null and valid per caller preconditions.
     let crtc_state = unsafe { drm_atomic_get_crtc_state(state, crtc) };
-    if IS_ERR(crtc_state) {
-        return PTR_ERR(crtc_state);
+    if is_err(crtc_state) {
+        return ptr_err(crtc_state);
     }
 
     // SAFETY: `state` points to an initialized `DrmAtomicCommit`.
@@ -2144,9 +2142,9 @@ pub unsafe extern "C" fn drm_atomic_add_affected_connectors(
             }
 
             let conn_state = drm_atomic_get_connector_state(state, connector);
-            if IS_ERR(conn_state) {
+            if is_err(conn_state) {
                 drm_connector_list_iter_end(iter);
-                return PTR_ERR(conn_state);
+                return ptr_err(conn_state);
             }
         }
         drm_connector_list_iter_end(iter);
@@ -2201,8 +2199,8 @@ pub unsafe extern "C" fn drm_atomic_add_affected_planes(
 
         // SAFETY: `state` and `plane` are valid pointers.
         let plane_state = unsafe { drm_atomic_get_plane_state(state, plane) };
-        if IS_ERR(plane_state) {
-            return PTR_ERR(plane_state);
+        if is_err(plane_state) {
+            return ptr_err(plane_state);
         }
     }
 
@@ -2492,8 +2490,8 @@ unsafe fn update_output_state(state: *mut DrmAtomicCommit, set: *mut DrmModeSet)
         for i in 0..num_set_conns {
             let conn = *(*set).connectors.add(i);
             let new_conn_state = drm_atomic_get_connector_state(state, conn);
-            if IS_ERR(new_conn_state) {
-                return PTR_ERR(new_conn_state);
+            if is_err(new_conn_state) {
+                return ptr_err(new_conn_state);
             }
             let ret = crate::drm_atomic_uapi_upstream::drm_atomic_set_crtc_for_connector(
                 new_conn_state,
@@ -2551,16 +2549,16 @@ pub unsafe extern "C" fn __drm_atomic_helper_set_config(
 
     // SAFETY: `state` and `crtc` are valid pointers.
     let crtc_state = unsafe { drm_atomic_get_crtc_state(state, crtc) };
-    if IS_ERR(crtc_state) {
-        return PTR_ERR(crtc_state);
+    if is_err(crtc_state) {
+        return ptr_err(crtc_state);
     }
 
     // SAFETY: `crtc` is valid and points to an initialized `DrmCrtc`.
     let primary = unsafe { (*crtc).primary };
     // SAFETY: `state` and `primary` are valid pointers.
     let primary_state = unsafe { drm_atomic_get_plane_state(state, primary) };
-    if IS_ERR(primary_state) {
-        return PTR_ERR(primary_state);
+    if is_err(primary_state) {
+        return ptr_err(primary_state);
     }
 
     // SAFETY: `set` is a valid `DrmModeSet` pointer.

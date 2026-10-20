@@ -30,11 +30,6 @@ use crate::{
     types::{AtomicT, Kref, RefcountT, Spinlock},
 };
 
-#[allow(non_camel_case_types)]
-pub type kref = Kref;
-#[allow(non_camel_case_types)]
-pub type refcount_t = RefcountT;
-
 // Linux 7.2.3 include/linux/gfp_types.h: ___GFP_DIRECT_RECLAIM_BIT follows
 // ___GFP_UNUSED_BIT, hence bit 10 in the reference configuration used here.
 const __GFP_DIRECT_RECLAIM: u32 = 1 << 10;
@@ -163,8 +158,8 @@ pub unsafe extern "C" fn kfree_c(object: *mut c_void) {
 }
 
 /// Linux `memdup_user(src, len)`: allocate `len` bytes and copy them from the
-/// current user address space. Failure returns `ERR_PTR(-ENOMEM)` or
-/// `ERR_PTR(-EFAULT)`, never NULL.
+/// current user address space. Failure returns `err_ptr(-ENOMEM)` or
+/// `err_ptr(-EFAULT)`, never NULL.
 ///
 /// # Safety
 ///
@@ -174,13 +169,13 @@ pub unsafe extern "C" fn kfree_c(object: *mut c_void) {
 pub unsafe extern "C" fn memdup_user(src: *const c_void, len: usize) -> *mut c_void {
     let copy = kmalloc(len, GFP_KERNEL);
     if copy.is_null() {
-        return crate::config::ERR_PTR(-crate::config::ENOMEM);
+        return crate::config::err_ptr(-crate::config::ENOMEM);
     }
     // SAFETY: `copy` points to `len` allocated bytes from `kmalloc`, and `crate::mm_native::copy_from_user` performs bounded copy with kernel fault handling.
     if len != 0 && unsafe { crate::mm_native::copy_from_user(copy, src, len) } != 0 {
         // SAFETY: `copy` was allocated by `kmalloc` above and is freed on failure.
         unsafe { kfree(copy) };
-        return crate::config::ERR_PTR(-crate::config::EFAULT);
+        return crate::config::err_ptr(-crate::config::EFAULT);
     }
     copy
 }

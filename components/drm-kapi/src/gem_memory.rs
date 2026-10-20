@@ -5,8 +5,6 @@
 // `struct shrinker` storage, x86_64 `pgprot_t`, `struct io_mapping`,
 // `struct resource`, and `drm_mm_node_allocated()`.
 
-#![allow(non_camel_case_types)]
-
 use core::ffi::{c_char, c_int, c_ulong, c_void};
 
 use crate::types::DrmMmNode;

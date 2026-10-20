@@ -11,7 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use drm_kapi::{list::INIT_LIST_HEAD, locks::spin_lock_init};
+use drm_kapi::{list::init_list_head, locks::spin_lock_init};
 
 use crate::{
     drm_device_types::DrmDevice,
@@ -24,6 +24,20 @@ static NEXT_HOST_TASK_ID: AtomicU64 = AtomicU64::new(1);
 
 std::thread_local! {
     static HOST_TASK_ID: u64 = NEXT_HOST_TASK_ID.fetch_add(1, Ordering::Relaxed);
+    static HOST_ADMIN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static HOST_SIGNAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub fn with_task_policy<T>(admin: bool, signal: bool, run: impl FnOnce() -> T) -> T {
+    struct Restore(bool, bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            HOST_ADMIN.set(self.0);
+            HOST_SIGNAL.set(self.1);
+        }
+    }
+    let _restore = Restore(HOST_ADMIN.replace(admin), HOST_SIGNAL.replace(signal));
+    run()
 }
 
 static HOST_WAIT_STATE: (Mutex<u64>, Condvar) = (Mutex::new(0), Condvar::new());
@@ -184,8 +198,8 @@ unsafe extern "C" fn host_current_pid_vnr() -> core::ffi::c_int {
 /// # Safety
 ///
 /// No caller-side invariants required; safe to call in any context.
-unsafe extern "C" fn host_capable(_capability: core::ffi::c_int) -> bool {
-    false
+unsafe extern "C" fn host_capable(capability: core::ffi::c_int) -> bool {
+    capability == drm_kapi::config::CAP_SYS_ADMIN && HOST_ADMIN.get()
 }
 
 /// # Safety
@@ -305,7 +319,7 @@ mod tests {
 ///
 /// In this host mock, signals are never pending; the task pointer is unused and requires no preconditions.
 unsafe extern "C" fn no_pending_host_signal(_state: i32, _task: *mut core::ffi::c_void) -> bool {
-    false
+    HOST_SIGNAL.get()
 }
 
 /// Install the real host monotonic clock used by host-only DRM tests.
@@ -369,7 +383,7 @@ impl TestDrm {
         // SAFETY: `dev` is a valid, uniquely owned heap allocation. `addr_of_mut!` generates valid
         // pointers to internal fields that match the expectations of list, lock, and kref initializers.
         unsafe {
-            INIT_LIST_HEAD(core::ptr::addr_of_mut!(dev.managed.resources));
+            init_list_head(core::ptr::addr_of_mut!(dev.managed.resources));
             spin_lock_init(&mut dev.managed.lock);
             drm_kapi::memory::kref_init(core::ptr::addr_of_mut!(dev.r#ref));
         }
@@ -396,8 +410,8 @@ impl TestDrm {
             drm_kapi::mutex::mutex_init(core::ptr::addr_of_mut!((*mc).idr_mutex));
             drm_kapi::mutex::mutex_init(core::ptr::addr_of_mut!((*mc).blob_lock));
             crate::drm_mode_object_upstream::idr_init(core::ptr::addr_of_mut!((*mc).object_idr));
-            INIT_LIST_HEAD(core::ptr::addr_of_mut!((*mc).property_list));
-            INIT_LIST_HEAD(core::ptr::addr_of_mut!((*mc).property_blob_list));
+            init_list_head(core::ptr::addr_of_mut!((*mc).property_list));
+            init_list_head(core::ptr::addr_of_mut!((*mc).property_blob_list));
         }
     }
 

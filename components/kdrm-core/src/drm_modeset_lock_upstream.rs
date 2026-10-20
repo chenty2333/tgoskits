@@ -188,7 +188,7 @@ pub unsafe extern "C" fn drm_modeset_acquire_init(ctx: *mut DrmModesetAcquireCtx
     }
 }
 
-// INIT_LIST_HEAD()
+// init_list_head()
 #[inline]
 /// # Safety
 /// `head` must point to valid, aligned, writable `ListHead` storage.

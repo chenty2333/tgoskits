@@ -6,8 +6,6 @@
 //! and private objects. Bridge and writeback state is outside this component's
 //! supported scope and is rejected by atomic validation.
 
-#![allow(non_snake_case)]
-
 use core::mem::size_of;
 
 use drm_kapi::{assert::warn_on, config::GFP_KERNEL, types::DmaFence};

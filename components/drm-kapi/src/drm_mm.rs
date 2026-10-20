@@ -7,8 +7,6 @@
 //! and the `CONFIG_DRM_DEBUG_MM` leak tracking are compiled out, matching the
 //! reference configuration.
 
-#![allow(non_snake_case)]
-
 use core::{
     ffi::{c_int, c_ulong},
     mem::offset_of,
@@ -18,7 +16,7 @@ use crate::{
     config::ENOSPC,
     list::{list_add, list_del},
     rbtree::{
-        RB_EMPTY_NODE, RbAugment, rb_erase_augmented, rb_erase_augmented_cached, rb_erase_cached,
+        RbAugment, rb_empty_node, rb_erase_augmented, rb_erase_augmented_cached, rb_erase_cached,
         rb_first_cached, rb_insert_augmented, rb_insert_augmented_cached, rb_insert_color_cached,
         rb_link_node, rb_parent, rb_prev,
     },
@@ -621,7 +619,7 @@ unsafe fn first_hole(mm: *mut DrmMm, start: u64, end: u64, size: u64, mode: u32)
 unsafe fn next_hole_addr(entry: *mut DrmMmNode, size: u64, high: bool) -> *mut DrmMmNode {
     // SAFETY: `entry` is checked non-null and linked; tree traversal follows valid augmented pointers.
     unsafe {
-        if entry.is_null() || RB_EMPTY_NODE(core::ptr::addr_of_mut!((*entry).rb_hole_addr)) {
+        if entry.is_null() || rb_empty_node(core::ptr::addr_of_mut!((*entry).rb_hole_addr)) {
             return core::ptr::null_mut();
         }
         let first = |n: *mut RbNode| if high { (*n).left } else { (*n).right };

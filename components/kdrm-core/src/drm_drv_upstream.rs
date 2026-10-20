@@ -5,8 +5,6 @@
 //! DRM core device allocation, initialization, registration, device-managed
 //! lifetime, unplug semantics, minors, and drm_dev_enter/exit.
 
-#![allow(non_snake_case)]
-
 use core::{
     ffi::{c_char, c_int, c_uint, c_ulong, c_void},
     sync::atomic::Ordering,
@@ -16,7 +14,7 @@ pub use drm_kapi::config::ENODEV;
 use drm_kapi::{
     config::{EBUSY, EINVAL, ENOMEM, GFP_KERNEL},
     idr::idr_init_base,
-    list::INIT_LIST_HEAD,
+    list::init_list_head,
     locks::spin_lock_init,
     memory::{kfree, kmalloc, kref_init, kref_put},
     mutex::{mutex_init, mutex_lock, mutex_unlock},
@@ -336,7 +334,7 @@ const _: () = assert!(core::mem::size_of::<DrmFsInode>() == 544);
 const _: () = assert!(core::mem::offset_of!(DrmFsInode, i_mapping) == 48);
 
 // upstream: drivers/gpu/drm/drm_drv.c drm_fs_inode_new()
-// Returns the inode, or an ERR_PTR when the page-cache owner cannot be created.
+// Returns the inode, or an err_ptr when the page-cache owner cannot be created.
 /// # Safety
 ///
 /// Caller assumes ownership of the returned inode pointer, which must eventually be released with `drm_fs_inode_free`.
@@ -352,7 +350,7 @@ unsafe fn drm_fs_inode_new() -> *mut c_void {
     // SAFETY: `c"drm"` is NUL-terminated and the shmem API consumes the name
     // during setup, retaining its own file state on success.
     let file = unsafe { drm_kapi::shmem::shmem_file_setup(c"drm".as_ptr(), 0, 0) };
-    if drm_kapi::config::IS_ERR(file) {
+    if drm_kapi::config::is_err(file) {
         // SAFETY: inode is the still-owned allocation from the earlier kmalloc.
         unsafe { kfree(inode) };
         return file.cast();
@@ -403,29 +401,29 @@ unsafe fn drm_dev_init(dev: *mut DrmDevice, driver: *const DrmDriver, parent: *m
             0
         };
 
-        INIT_LIST_HEAD(core::ptr::addr_of_mut!((*dev).managed.resources));
+        init_list_head(core::ptr::addr_of_mut!((*dev).managed.resources));
         spin_lock_init(&mut (*dev).managed.lock);
 
         mutex_init(core::ptr::addr_of_mut!((*dev).master_mutex));
         mutex_init(core::ptr::addr_of_mut!((*dev).filelist_mutex));
-        INIT_LIST_HEAD(core::ptr::addr_of_mut!((*dev).filelist));
-        INIT_LIST_HEAD(core::ptr::addr_of_mut!((*dev).filelist_internal));
+        init_list_head(core::ptr::addr_of_mut!((*dev).filelist));
+        init_list_head(core::ptr::addr_of_mut!((*dev).filelist_internal));
         mutex_init(core::ptr::addr_of_mut!((*dev).clientlist_mutex));
-        INIT_LIST_HEAD(core::ptr::addr_of_mut!((*dev).clientlist));
-        INIT_LIST_HEAD(core::ptr::addr_of_mut!((*dev).client_sysrq_list));
+        init_list_head(core::ptr::addr_of_mut!((*dev).clientlist));
+        init_list_head(core::ptr::addr_of_mut!((*dev).client_sysrq_list));
 
         spin_lock_init(&mut (*dev).event_lock);
         spin_lock_init(&mut (*dev).vblank_time_lock);
         spin_lock_init(&mut (*dev).vbl_lock);
-        INIT_LIST_HEAD(core::ptr::addr_of_mut!((*dev).vblank_event_list));
+        init_list_head(core::ptr::addr_of_mut!((*dev).vblank_event_list));
 
         mutex_init(core::ptr::addr_of_mut!((*dev).object_name_lock));
         idr_init_base(core::ptr::addr_of_mut!((*dev).object_name_idr), 1);
         mutex_init(core::ptr::addr_of_mut!((*dev).gem_lru_mutex));
 
         let inode = drm_fs_inode_new();
-        if drm_kapi::config::IS_ERR(inode) {
-            return drm_kapi::config::PTR_ERR(inode);
+        if drm_kapi::config::is_err(inode) {
+            return drm_kapi::config::ptr_err(inode);
         }
         (*dev).anon_inode = inode;
 

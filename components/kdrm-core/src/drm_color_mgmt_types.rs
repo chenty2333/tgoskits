@@ -6,7 +6,6 @@
 // size and field offset is pinned by a compile-time assertion.
 //! Linux DRM type definitions. Source headers:
 //! `include/drm/drm_color_mgmt.h`
-#![allow(non_camel_case_types, non_upper_case_globals, non_snake_case)]
 
 pub type DrmColorEncoding = u32;
 pub const DRM_COLOR_YCBCR_BT601: DrmColorEncoding = 0;

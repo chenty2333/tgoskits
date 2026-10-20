@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright 2026 TheKernel contributors. See ../LICENSE-MIT.
 //! Port of Linux `drivers/gpu/drm/drm_vblank_helper.c` (Virtio V0).
-#![allow(non_snake_case)]
 
 use drm_kapi::locks::{spin_lock_irq, spin_unlock_irq};
 

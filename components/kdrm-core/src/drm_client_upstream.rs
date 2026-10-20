@@ -2,14 +2,12 @@
 // Copyright 2026 TheKernel contributors. See ../LICENSE-MIT.
 //! Port of Linux `drivers/gpu/drm/drm_client.c`.
 
-#![allow(non_snake_case, non_upper_case_globals)]
-
 use core::ffi::c_char;
 
 #[cfg(not(test))]
 use drm_kapi::mutex::{mutex_lock, mutex_unlock};
 use drm_kapi::{
-    config::{EINVAL, ENOENT, ENOMEM, ERR_PTR},
+    config::{EINVAL, ENOENT, ENOMEM, err_ptr},
     list::{list_add_tail, list_del},
     memory::{kfree, kzalloc_obj},
 };
@@ -250,11 +248,11 @@ pub unsafe extern "C" fn drm_client_buffer_create(
 ) -> *mut DrmClientBuffer {
     // SAFETY: Caller guarantees `client` is either null or a valid pointer to `DrmClientDev`.
     if client.is_null() || unsafe { (*client).dev.is_null() || (*client).file.is_null() } {
-        return ERR_PTR::<DrmClientBuffer>(-EINVAL);
+        return err_ptr::<DrmClientBuffer>(-EINVAL);
     }
     let buffer = kzalloc_obj::<DrmClientBuffer>();
     if buffer.is_null() {
-        return ERR_PTR::<DrmClientBuffer>(-ENOMEM);
+        return err_ptr::<DrmClientBuffer>(-ENOMEM);
     }
     // SAFETY: `buffer` was freshly allocated by `kzalloc_obj` and checked non-null.
     unsafe { (*buffer).client = client };
@@ -264,7 +262,7 @@ pub unsafe extern "C" fn drm_client_buffer_create(
     if obj.is_null() {
         // SAFETY: `buffer` was allocated above and has not been stored or exposed.
         unsafe { kfree(buffer) };
-        return ERR_PTR::<DrmClientBuffer>(-ENOENT);
+        return err_ptr::<DrmClientBuffer>(-ENOENT);
     }
 
     let mut request = DrmModeFbCmd2 {
@@ -296,7 +294,7 @@ pub unsafe extern "C" fn drm_client_buffer_create(
             drm_gem_object_put(obj);
             kfree(buffer);
         }
-        return ERR_PTR::<DrmClientBuffer>(ret);
+        return err_ptr::<DrmClientBuffer>(ret);
     }
 
     // SAFETY: `dev` and `file` are valid; looks up newly created framebuffer by ID.
@@ -310,7 +308,7 @@ pub unsafe extern "C" fn drm_client_buffer_create(
             drm_gem_object_put(obj);
             kfree(buffer);
         }
-        return ERR_PTR::<DrmClientBuffer>(-ENOENT);
+        return err_ptr::<DrmClientBuffer>(-ENOENT);
     }
     // SAFETY: Drops lookup reference count on `fb`, initializes `comm` and records `gem` and `fb` in `buffer`.
     unsafe {
@@ -441,11 +439,11 @@ pub unsafe extern "C" fn drm_client_buffer_create_dumb(
 ) -> *mut DrmClientBuffer {
     // SAFETY: Checks nullness of `client->dev`.
     if client.is_null() || unsafe { (*client).dev.is_null() } {
-        return ERR_PTR::<DrmClientBuffer>(-EINVAL);
+        return err_ptr::<DrmClientBuffer>(-EINVAL);
     }
     let info = crate::drm_fourcc_upstream::drm_format_info(format);
     if info.is_null() {
-        return ERR_PTR::<DrmClientBuffer>(-EINVAL);
+        return err_ptr::<DrmClientBuffer>(-EINVAL);
     }
     let mut args = crate::uapi_drm_mode_types::DrmModeCreateDumb {
         height,
@@ -470,12 +468,12 @@ pub unsafe extern "C" fn drm_client_buffer_create_dumb(
         )
     };
     if ret != 0 {
-        return ERR_PTR::<DrmClientBuffer>(ret);
+        return err_ptr::<DrmClientBuffer>(ret);
     }
     // SAFETY: `client` is valid; creates client buffer wrapping the dumb handle.
     let buffer =
         unsafe { drm_client_buffer_create(client, width, height, format, args.handle, args.pitch) };
-    if drm_kapi::config::IS_ERR(buffer) {
+    if drm_kapi::config::is_err(buffer) {
         // SAFETY: Destroys the allocated dumb buffer on buffer creation failure.
         unsafe {
             crate::drm_dumb_buffers_upstream::drm_mode_destroy_dumb(dev, args.handle, file);

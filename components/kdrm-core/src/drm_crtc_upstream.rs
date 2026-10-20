@@ -15,7 +15,6 @@
 
 // The Linux ports state the invariant of each C-ABI call once in the module
 // header, as the GT ports do; per-block SAFETY prose is not repeated.
-#![allow(non_snake_case)]
 
 use core::{
     ffi::{c_char, c_void},
@@ -25,14 +24,14 @@ use core::{
 use drm_kapi::{
     assert::warn_on,
     config::{
-        EFAULT, EINVAL, ENOENT, ENOMEM, EOPNOTSUPP, ERANGE, ERR_PTR, GFP_KERNEL, IS_ERR, PTR_ERR,
+        EFAULT, EINVAL, ENOENT, ENOMEM, EOPNOTSUPP, ERANGE, GFP_KERNEL, err_ptr, is_err, ptr_err,
     },
 };
 
 /// `EACCES` (errno 13; not present in the kapi errno table).
 const EACCES: i32 = 13;
 use drm_kapi::{
-    list::{INIT_LIST_HEAD, list_add_tail, list_del},
+    list::{init_list_head, list_add_tail, list_del},
     locks::spin_lock_init,
     types::{DmaFence, ListHead},
 };
@@ -570,7 +569,7 @@ unsafe fn __drm_crtc_init_with_planes(
 
         (*crtc).dev = dev;
         (*crtc).funcs = funcs as *mut DrmCrtcFuncs;
-        INIT_LIST_HEAD(core::ptr::addr_of_mut!((*crtc).commit_list));
+        init_list_head(core::ptr::addr_of_mut!((*crtc).commit_list));
         spin_lock_init(&mut (*crtc).commit_lock);
         drm_modeset_lock_init(core::ptr::addr_of_mut!((*crtc).mutex));
 
@@ -742,18 +741,18 @@ pub unsafe extern "C" fn __drmm_crtc_alloc_with_planes(
     // aligned `DrmCrtc` pointer within the allocated block. Initializing via `__drmm_crtc_init_with_planes`.
     unsafe {
         if warn_on(funcs.is_null() || (*funcs).destroy.is_some()) {
-            return ERR_PTR::<c_void>(-EINVAL);
+            return err_ptr::<c_void>(-EINVAL);
         }
 
         let container = drm_kapi::memory::drmm_kzalloc_c(dev as *mut c_void, size, GFP_KERNEL);
         if container.is_null() {
-            return ERR_PTR::<c_void>(-ENOMEM);
+            return err_ptr::<c_void>(-ENOMEM);
         }
 
         let crtc = (container as *mut u8).add(offset) as *mut DrmCrtc;
         let ret = __drmm_crtc_init_with_planes(dev, crtc, primary, cursor, funcs, name);
         if ret != 0 {
-            return ERR_PTR::<c_void>(ret);
+            return err_ptr::<c_void>(ret);
         }
         container
     }
@@ -877,7 +876,10 @@ pub unsafe extern "C" fn drm_mode_getcrtc(
             }
         }
 
-        if !(*file_priv).aspect_ratio_allowed {
+        if !(*file_priv)
+            .aspect_ratio_allowed
+            .load(core::sync::atomic::Ordering::Relaxed)
+        {
             (*crtc_resp).mode.flags &= !DRM_MODE_FLAG_PIC_AR_MASK;
         }
 
@@ -1092,7 +1094,9 @@ pub unsafe extern "C" fn drm_mode_setcrtc(
                         break 'out;
                     }
 
-                    if !(*file_priv).aspect_ratio_allowed
+                    if !(*file_priv)
+                        .aspect_ratio_allowed
+                        .load(core::sync::atomic::Ordering::Relaxed)
                         && ((*crtc_req).mode.flags & DRM_MODE_FLAG_PIC_AR_MASK)
                             != DRM_MODE_FLAG_PIC_AR_NONE
                     {
@@ -1262,8 +1266,8 @@ pub unsafe extern "C" fn drm_crtc_create_scaling_filter_property(
             (*crtc).dev,
             supported_filters,
         );
-        if IS_ERR(prop) {
-            return PTR_ERR(prop);
+        if is_err(prop) {
+            return ptr_err(prop);
         }
 
         drm_object_attach_property(
@@ -1369,8 +1373,8 @@ mod tests {
         let dev = drm.ptr();
         // SAFETY: Test harness exercises CRTC initialization and teardown sequence.
         unsafe {
-            INIT_LIST_HEAD(core::ptr::addr_of_mut!((*dev).mode_config.crtc_list));
-            INIT_LIST_HEAD(core::ptr::addr_of_mut!((*dev).mode_config.plane_list));
+            init_list_head(core::ptr::addr_of_mut!((*dev).mode_config.crtc_list));
+            init_list_head(core::ptr::addr_of_mut!((*dev).mode_config.plane_list));
             let f = funcs();
 
             let c1: *mut DrmCrtc = Box::into_raw(Box::new(zeroed()));

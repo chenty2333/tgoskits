@@ -5,7 +5,6 @@
 //! Provides memory-backed GEM buffer objects with lifecycle management,
 //! page allocation from kernel shmem files, CPU and I/O memory mapping,
 //! scatter-gather table construction, and PRIME buffer sharing.
-#![allow(non_snake_case)]
 
 use core::{
     ffi::{c_int, c_uint, c_void},
@@ -16,9 +15,9 @@ use core::{
 use drm_kapi::{
     assert::warn_on,
     config::{
-        EINVAL, EIO, EOPNOTSUPP, EOVERFLOW, GFP_KERNEL, IS_ERR, PAGE_SHIFT, PAGE_SIZE, PTR_ERR,
+        EINVAL, EIO, EOPNOTSUPP, EOVERFLOW, GFP_KERNEL, PAGE_SHIFT, PAGE_SIZE, is_err, ptr_err,
     },
-    list::INIT_LIST_HEAD,
+    list::init_list_head,
     memory::{
         kfree, kmalloc, kzalloc_obj, refcount_dec_and_test, refcount_inc_not_zero, refcount_read,
         refcount_set,
@@ -447,8 +446,8 @@ unsafe fn setup_shmem_object(
             }
 
             let backing = shmem_file_setup(c"drm-gem-shmem".as_ptr(), byte_size as u64, 0);
-            if IS_ERR(backing) {
-                let err = PTR_ERR(backing);
+            if is_err(backing) {
+                let err = ptr_err(backing);
                 crate::drm_gem_upstream::drm_gem_private_object_fini(gem);
                 return err;
             }
@@ -465,7 +464,7 @@ unsafe fn setup_shmem_object(
             return offset_res;
         }
 
-        INIT_LIST_HEAD(ptr::addr_of_mut!((*shmem).madv_list));
+        init_list_head(ptr::addr_of_mut!((*shmem).madv_list));
         if !is_private {
             let map = file_mapping(shmem);
             if !map.is_null() {
@@ -503,23 +502,23 @@ unsafe fn allocate_and_init_shmem(
         .checked_add(PAGE_SIZE - 1)
         .map(|s| s & !(PAGE_SIZE - 1))
     else {
-        return drm_kapi::config::ERR_PTR(-EOVERFLOW);
+        return drm_kapi::config::err_ptr(-EOVERFLOW);
     };
 
     // SAFETY: Checks `dev` and `(*dev).driver` for null. If the driver provides a custom
     // `gem_create_object` callback, invokes it; otherwise allocates zeroed memory via `kzalloc_obj`.
     let shmem_ptr = unsafe {
         if dev.is_null() || (*dev).driver.is_null() {
-            return drm_kapi::config::ERR_PTR(-EINVAL);
+            return drm_kapi::config::err_ptr(-EINVAL);
         }
         let driver = (*dev).driver.cast::<DrmDriver>();
         if let Some(create_fn) = (*driver).gem_create_object {
             let created = create_fn(dev, aligned_size);
-            if IS_ERR(created) {
+            if is_err(created) {
                 return created.cast();
             }
             if created.is_null() {
-                return drm_kapi::config::ERR_PTR(-EINVAL);
+                return drm_kapi::config::err_ptr(-EINVAL);
             }
             gem_to_shmem(created)
         } else {
@@ -528,7 +527,7 @@ unsafe fn allocate_and_init_shmem(
     };
 
     if shmem_ptr.is_null() {
-        return drm_kapi::config::ERR_PTR(-drm_kapi::config::ENOMEM);
+        return drm_kapi::config::err_ptr(-drm_kapi::config::ENOMEM);
     }
 
     // SAFETY: `shmem_ptr` was successfully allocated with suitable alignment and size,
@@ -537,7 +536,7 @@ unsafe fn allocate_and_init_shmem(
     if status != 0 {
         // SAFETY: Deallocates `shmem_ptr` upon initialization failure to prevent leak.
         unsafe { kfree(shmem_ptr.cast::<c_void>()) };
-        return drm_kapi::config::ERR_PTR(status);
+        return drm_kapi::config::err_ptr(status);
     }
     shmem_ptr
 }
@@ -546,7 +545,7 @@ unsafe fn allocate_and_init_shmem(
 /// - `dev` must point to an active `DrmDevice` whose `driver` field is initialized.
 /// - `size` is the requested buffer size in bytes (rounded up to PAGE_SIZE internally).
 /// - On success, returns a pointer to a newly allocated `DrmGemShmemObject` with refcount 1.
-///   On failure, returns an ERR_PTR encoded error code.
+///   On failure, returns an err_ptr encoded error code.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn drm_gem_shmem_create(
     dev: *mut DrmDevice,
@@ -595,9 +594,9 @@ unsafe fn acquire_pages_locked(shmem: *mut DrmGemShmemObject) -> i32 {
 
         for idx in 0..num_pages {
             let retrieved = shmem_read_mapping_page_gfp(space, idx as u64, SHMEM_ALLOC_FLAGS);
-            if retrieved.is_null() || IS_ERR(retrieved) {
-                let err_code = if IS_ERR(retrieved) {
-                    PTR_ERR(retrieved)
+            if retrieved.is_null() || is_err(retrieved) {
+                let err_code = if is_err(retrieved) {
+                    ptr_err(retrieved)
                 } else {
                     -drm_kapi::config::ENOMEM
                 };
@@ -976,8 +975,8 @@ pub unsafe extern "C" fn drm_gem_shmem_dumb_create(
             return size_err;
         }
         let shmem = drm_gem_shmem_create(dev, (*args).size as usize);
-        if IS_ERR(shmem) {
-            return PTR_ERR(shmem);
+        if is_err(shmem) {
+            return ptr_err(shmem);
         }
         let gem_obj = ptr::addr_of_mut!((*shmem).base);
         let handle_err = crate::drm_gem_upstream::drm_gem_handle_create(
@@ -1100,15 +1099,15 @@ pub unsafe extern "C" fn drm_gem_shmem_get_sg_table(shmem: *mut DrmGemShmemObjec
         let gem = ptr::addr_of_mut!((*shmem).base);
         warn_on(object_is_imported(gem));
         if object_is_imported(gem) || (*shmem).pages.is_null() {
-            return drm_kapi::config::ERR_PTR(-EINVAL);
+            return drm_kapi::config::err_ptr(-EINVAL);
         }
         let count = total_pages(shmem);
         let Ok(page_count_u32) = u32::try_from(count) else {
-            return drm_kapi::config::ERR_PTR(-EOVERFLOW);
+            return drm_kapi::config::err_ptr(-EOVERFLOW);
         };
         let table = kzalloc_obj::<SgTable>();
         if table.is_null() {
-            return drm_kapi::config::ERR_PTR(-drm_kapi::config::ENOMEM);
+            return drm_kapi::config::err_ptr(-drm_kapi::config::ENOMEM);
         }
         let alloc_res = sg_alloc_table_from_pages_segment(
             table,
@@ -1121,7 +1120,7 @@ pub unsafe extern "C" fn drm_gem_shmem_get_sg_table(shmem: *mut DrmGemShmemObjec
         );
         if alloc_res != 0 {
             kfree(table);
-            return drm_kapi::config::ERR_PTR(alloc_res);
+            return drm_kapi::config::err_ptr(alloc_res);
         }
         table
     }
@@ -1139,17 +1138,17 @@ unsafe fn create_and_map_sgt_locked(shmem: *mut DrmGemShmemObject) -> *mut SgTab
             return (*shmem).sgt;
         }
         if object_is_imported(ptr::addr_of!((*shmem).base)) {
-            return drm_kapi::config::ERR_PTR(-EINVAL);
+            return drm_kapi::config::err_ptr(-EINVAL);
         }
         let pages_res = acquire_pages_locked(shmem);
         if pages_res != 0 {
-            return drm_kapi::config::ERR_PTR(pages_res);
+            return drm_kapi::config::err_ptr(pages_res);
         }
         let sgt = drm_gem_shmem_get_sg_table(shmem);
-        if IS_ERR(sgt) {
-            let err = PTR_ERR(sgt);
+        if is_err(sgt) {
+            let err = ptr_err(sgt);
             drm_gem_shmem_put_pages_locked(shmem);
-            return drm_kapi::config::ERR_PTR(err);
+            return drm_kapi::config::err_ptr(err);
         }
         let dma_dev = (*(*shmem).base.dev).dev;
         let map_res = dma_map_sgtable(dma_dev, sgt, DMA_BIDIRECTIONAL, 0);
@@ -1157,7 +1156,7 @@ unsafe fn create_and_map_sgt_locked(shmem: *mut DrmGemShmemObject) -> *mut SgTab
             sg_free_table(sgt);
             kfree(sgt.cast::<c_void>());
             drm_gem_shmem_put_pages_locked(shmem);
-            return drm_kapi::config::ERR_PTR(map_res);
+            return drm_kapi::config::err_ptr(map_res);
         }
         (*shmem).sgt = sgt;
         sgt
@@ -1178,7 +1177,7 @@ pub unsafe extern "C" fn drm_gem_shmem_get_pages_sgt(
         let resv = (*shmem).base.resv;
         let lock_res = acquire_reservation_lock_interruptible(resv, ptr::null_mut());
         if lock_res != 0 {
-            return drm_kapi::config::ERR_PTR(lock_res);
+            return drm_kapi::config::err_ptr(lock_res);
         }
         let table = create_and_map_sgt_locked(shmem);
         release_reservation_lock(resv);
@@ -1190,7 +1189,7 @@ pub unsafe extern "C" fn drm_gem_shmem_get_pages_sgt(
 /// - `dev` must point to an active, initialized `DrmDevice`.
 /// - `attach` must point to a live `DmaBufAttachment` with a non-null `dmabuf`.
 /// - `sgt` must point to a valid `SgTable` already DMA-mapped for this attachment.
-/// - Returns a newly allocated `DrmGemObject` with refcount 1, or an ERR_PTR on failure.
+/// - Returns a newly allocated `DrmGemObject` with refcount 1, or an err_ptr on failure.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn drm_gem_shmem_prime_import_sg_table(
     dev: *mut DrmDevice,
@@ -1201,13 +1200,13 @@ pub unsafe extern "C" fn drm_gem_shmem_prime_import_sg_table(
     // shmem GEM object via `allocate_and_init_shmem`, attaches `sgt`, and returns base pointer.
     unsafe {
         if attach.is_null() || (*attach).dmabuf.is_null() {
-            return drm_kapi::config::ERR_PTR(-EINVAL);
+            return drm_kapi::config::err_ptr(-EINVAL);
         }
         let Some(aligned_size) = (*(*attach).dmabuf).size.checked_add(PAGE_SIZE - 1) else {
-            return drm_kapi::config::ERR_PTR(-EOVERFLOW);
+            return drm_kapi::config::err_ptr(-EOVERFLOW);
         };
         let shmem = allocate_and_init_shmem(dev, aligned_size & !(PAGE_SIZE - 1), true);
-        if IS_ERR(shmem) {
+        if is_err(shmem) {
             return shmem.cast();
         }
         (*shmem).sgt = sgt;
@@ -1218,7 +1217,7 @@ pub unsafe extern "C" fn drm_gem_shmem_prime_import_sg_table(
 /// # Safety
 /// - `dev` must point to an active, initialized `DrmDevice`.
 /// - `dmabuf` must point to a live, open `DmaBuf` structure.
-/// - Returns an acquired `DrmGemObject` pointer with an incremented refcount, or ERR_PTR on failure.
+/// - Returns an acquired `DrmGemObject` pointer with an incremented refcount, or err_ptr on failure.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn drm_gem_shmem_prime_import_no_map(
     dev: *mut DrmDevice,
@@ -1230,7 +1229,7 @@ pub unsafe extern "C" fn drm_gem_shmem_prime_import_no_map(
     // `import_attach` and `resv`.
     unsafe {
         if dev.is_null() || dmabuf.is_null() {
-            return drm_kapi::config::ERR_PTR(-EINVAL);
+            return drm_kapi::config::err_ptr(-EINVAL);
         }
         if crate::drm_prime_upstream::drm_gem_is_prime_exported_dma_buf(dev, dmabuf) {
             let existing = (*dmabuf).r#priv.cast::<DrmGemObject>();
@@ -1239,26 +1238,26 @@ pub unsafe extern "C" fn drm_gem_shmem_prime_import_no_map(
         }
 
         let attach = dma_buf_attach(dmabuf, (*dev).dev);
-        if IS_ERR(attach) {
+        if is_err(attach) {
             return attach.cast();
         }
         if attach.is_null() {
-            return drm_kapi::config::ERR_PTR(-EIO);
+            return drm_kapi::config::err_ptr(-EIO);
         }
 
         crate::drm_prime_upstream::get_dma_buf(dmabuf);
         let Some(aligned_size) = (*dmabuf).size.checked_add(PAGE_SIZE - 1) else {
             dma_buf_detach(dmabuf, attach);
             dma_buf_put(dmabuf);
-            return drm_kapi::config::ERR_PTR(-EOVERFLOW);
+            return drm_kapi::config::err_ptr(-EOVERFLOW);
         };
 
         let shmem = allocate_and_init_shmem(dev, aligned_size & !(PAGE_SIZE - 1), true);
-        if IS_ERR(shmem) {
-            let err = PTR_ERR(shmem);
+        if is_err(shmem) {
+            let err = ptr_err(shmem);
             dma_buf_detach(dmabuf, attach);
             dma_buf_put(dmabuf);
-            return drm_kapi::config::ERR_PTR(err);
+            return drm_kapi::config::err_ptr(err);
         }
 
         (*shmem).base.import_attach = attach.cast();
@@ -1503,7 +1502,7 @@ mod tests {
             test_dev.dev.vma_offset_manager = &mut *vma_mgr;
 
             let shmem = drm_gem_shmem_create(test_dev.ptr(), 2 * PAGE_SIZE);
-            assert!(!IS_ERR(shmem));
+            assert!(!is_err(shmem));
             assert_eq!(drm_gem_shmem_pin_locked(shmem), 0);
             assert_eq!(refcount_read(&(*shmem).pages_use_count), 1);
             assert_eq!(refcount_read(&(*shmem).pages_pin_count), 1);
@@ -1513,7 +1512,7 @@ mod tests {
             assert_eq!(refcount_read(&(*shmem).pages_use_count), 1);
             assert_eq!(refcount_read(&(*shmem).pages_pin_count), 2);
             let sgt = drm_gem_shmem_get_sg_table(shmem);
-            assert!(!IS_ERR(sgt));
+            assert!(!is_err(sgt));
             assert!((*sgt).orig_nents >= 1 && (*sgt).orig_nents <= 2);
             sg_free_table(sgt);
             kfree(sgt);
@@ -1546,9 +1545,9 @@ mod tests {
             test_dev.dev.vma_offset_manager = &mut *vma_mgr;
 
             let shmem = drm_gem_shmem_create(test_dev.ptr(), 2 * PAGE_SIZE);
-            assert!(!IS_ERR(shmem));
+            assert!(!is_err(shmem));
             let sgt = drm_gem_shmem_get_pages_sgt(shmem);
-            assert!(IS_ERR(sgt));
+            assert!(is_err(sgt));
             assert_eq!(refcount_read(&(*shmem).pages_use_count), 0);
             assert!((*shmem).pages.is_null());
             assert!((*shmem).sgt.is_null());

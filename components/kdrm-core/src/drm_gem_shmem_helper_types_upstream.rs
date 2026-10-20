@@ -4,7 +4,6 @@
 // Linux v7.2.3 include/drm/drm_gem_shmem_helper.h, defined from its source
 // field order and x86_64 ABI. The three Linux bool bitfields share one byte.
 //! Linux DRM shmem-helper object definition.
-#![allow(non_camel_case_types, non_upper_case_globals, non_snake_case)]
 
 use core::{
     ffi::c_void,

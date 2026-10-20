@@ -6,29 +6,18 @@
 //! creation/destruction, current-master checks, magic generation and authentication,
 //! and the SET_MASTER / DROP_MASTER ioctls.
 
-#![allow(non_snake_case)]
-
 use alloc::boxed::Box;
 
-#[cfg(not(test))]
-use drm_kapi::mutex::{mutex_lock, mutex_unlock};
 use drm_kapi::{
     assert::warn_on,
     config::{CAP_SYS_ADMIN, EBUSY, EINVAL, ENOMEM},
     kernel_services::capable,
-    list::INIT_LIST_HEAD,
+    list::init_list_head,
     locks::{spin_lock_raw, spin_unlock_raw},
     memory::{kfree, kref_init, kref_put},
+    mutex::{mutex_lock, mutex_unlock},
+    types::Kref,
 };
-/// # Safety
-/// Test mock function; caller must adhere to mutex locking protocol.
-#[cfg(test)]
-unsafe fn mutex_lock<M>(_mutex: M) {}
-/// # Safety
-/// Test mock function; caller must adhere to mutex unlocking protocol.
-#[cfg(test)]
-unsafe fn mutex_unlock<M>(_mutex: M) {}
-use drm_kapi::types::Kref;
 
 use crate::{
     drm_auth_types::DrmMaster,
@@ -47,12 +36,14 @@ const EACCES: i32 = 13;
 // upstream: drivers/gpu/drm/drm_auth.c drm_is_current_master_locked()
 /// # Safety
 /// `fpriv` must be non-null, properly aligned, and point to a live `DrmFile` whose
-/// `master_lookup_lock` or device `master_mutex` is held by the caller.
+/// device `master_mutex` is held by the caller.
 unsafe fn drm_is_current_master_locked(fpriv: *mut DrmFile) -> bool {
     // SAFETY: The caller holds the appropriate lookup/device lock and guarantees `fpriv`,
     // its `minor`, and `dev` remain live and readable without concurrent modification.
     unsafe {
-        (*fpriv).is_master
+        (*fpriv)
+            .is_master
+            .load(core::sync::atomic::Ordering::Relaxed)
             && !(*fpriv).master.is_null()
             && drm_lease_owner((*fpriv).master) == (*(*fpriv).minor).dev.as_ref().unwrap().master
     }
@@ -67,12 +58,14 @@ pub unsafe extern "C" fn drm_is_current_master(fpriv: *mut DrmFile) -> bool {
     if fpriv.is_null() {
         return false;
     }
-    // SAFETY: `fpriv` is non-null. `master_lookup_lock` is acquired and released around
-    // the call to `drm_is_current_master_locked` to protect reading `(*fpriv).master`.
+    // SAFETY: The open file retains its device. The device master mutex protects
+    // both dev.master and changes to this file's master identity. The per-file
+    // lookup lock alone cannot synchronize another file changing dev.master.
     unsafe {
-        spin_lock_raw(core::ptr::addr_of_mut!((*fpriv).master_lookup_lock));
+        let dev = (*(*fpriv).minor).dev;
+        mutex_lock(core::ptr::addr_of_mut!((*dev).master_mutex));
         let ret = drm_is_current_master_locked(fpriv);
-        spin_unlock_raw(core::ptr::addr_of_mut!((*fpriv).master_lookup_lock));
+        mutex_unlock(core::ptr::addr_of_mut!((*dev).master_mutex));
         ret
     }
 }
@@ -136,7 +129,9 @@ pub unsafe extern "C" fn drm_authmagic(
         )
         .cast::<DrmFile>();
         if !file.is_null() {
-            (*file).authenticated = true;
+            (*file)
+                .authenticated
+                .store(true, core::sync::atomic::Ordering::Relaxed);
             idr_replace(
                 core::ptr::addr_of_mut!((*(*file_priv).master).magic_map),
                 core::ptr::null_mut(),
@@ -163,8 +158,8 @@ pub unsafe extern "C" fn drm_master_create(dev: *mut DrmDevice) -> *mut DrmMaste
         (*master).dev = dev;
         kref_init(core::ptr::addr_of_mut!((*master).refcount));
         idr_init_base(core::ptr::addr_of_mut!((*master).magic_map), 1);
-        INIT_LIST_HEAD(core::ptr::addr_of_mut!((*master).lessees));
-        INIT_LIST_HEAD(core::ptr::addr_of_mut!((*master).lessee_list));
+        init_list_head(core::ptr::addr_of_mut!((*master).lessees));
+        init_list_head(core::ptr::addr_of_mut!((*master).lessee_list));
         idr_init(core::ptr::addr_of_mut!((*master).leases));
         idr_init_base(core::ptr::addr_of_mut!((*master).lessee_idr), 1);
     }
@@ -186,7 +181,9 @@ unsafe fn drm_set_master(dev: *mut DrmDevice, fpriv: *mut DrmFile, new_master: b
         {
             master_set(dev, fpriv, new_master);
         }
-        (*fpriv).was_master = true;
+        (*fpriv)
+            .was_master
+            .store(true, core::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -198,7 +195,11 @@ unsafe fn drm_new_set_master(dev: *mut DrmDevice, fpriv: *mut DrmFile) -> i32 {
     // SAFETY: Caller holds `master_mutex`. A new master is created and assigned to `fpriv` under
     // `master_lookup_lock`, and previous master (if any) is released.
     unsafe {
-        warn_on((*fpriv).is_master);
+        warn_on(
+            (*fpriv)
+                .is_master
+                .load(core::sync::atomic::Ordering::Relaxed),
+        );
         let mut old_master = (*fpriv).master;
         let new_master = drm_master_create(dev);
         if new_master.is_null() {
@@ -208,8 +209,12 @@ unsafe fn drm_new_set_master(dev: *mut DrmDevice, fpriv: *mut DrmFile) -> i32 {
         (*fpriv).master = new_master;
         spin_unlock_raw(core::ptr::addr_of_mut!((*fpriv).master_lookup_lock));
 
-        (*fpriv).is_master = true;
-        (*fpriv).authenticated = true;
+        (*fpriv)
+            .is_master
+            .store(true, core::sync::atomic::Ordering::Relaxed);
+        (*fpriv)
+            .authenticated
+            .store(true, core::sync::atomic::Ordering::Relaxed);
 
         drm_set_master(dev, fpriv, true);
 
@@ -227,7 +232,10 @@ unsafe fn drm_new_set_master(dev: *mut DrmDevice, fpriv: *mut DrmFile) -> i32 {
 unsafe fn drm_master_check_perm(_dev: *mut DrmDevice, file_priv: *mut DrmFile) -> i32 {
     // SAFETY: `file_priv` is live; reading `was_master` is safe.
     unsafe {
-        if (*file_priv).was_master {
+        if (*file_priv)
+            .was_master
+            .load(core::sync::atomic::Ordering::Relaxed)
+        {
             return 0;
         }
         if !capable(CAP_SYS_ADMIN) {
@@ -271,7 +279,10 @@ pub unsafe extern "C" fn drm_setmaster_ioctl(
             return -EINVAL;
         }
 
-        if !(*file_priv).is_master {
+        if !(*file_priv)
+            .is_master
+            .load(core::sync::atomic::Ordering::Relaxed)
+        {
             let res = drm_new_set_master(dev, file_priv);
             mutex_unlock(core::ptr::addr_of_mut!((*dev).master_mutex));
             return res;
@@ -393,7 +404,9 @@ pub unsafe extern "C" fn drm_master_release(file_priv: *mut DrmFile) {
         }
 
         if drm_core_check_feature(dev, DRIVER_MODESET)
-            && (*file_priv).is_master
+            && (*file_priv)
+                .is_master
+                .load(core::sync::atomic::Ordering::Relaxed)
             && !master.is_null()
         {
             drm_lease_revoke(master);
@@ -542,14 +555,22 @@ mod tests {
             assert!(!file1.is_null());
             assert_eq!(super::drm_master_open(file1), 0);
             assert!(drm_is_current_master(file1));
-            assert!((*file1).authenticated);
+            assert!(
+                (*file1)
+                    .authenticated
+                    .load(core::sync::atomic::Ordering::Relaxed)
+            );
 
             // 2. Second file opened is not master, and not authenticated
             let file2 = drm_file_alloc((*dev).primary);
             assert!(!file2.is_null());
             assert_eq!(super::drm_master_open(file2), 0);
             assert!(!drm_is_current_master(file2));
-            assert!(!(*file2).authenticated);
+            assert!(
+                !(*file2)
+                    .authenticated
+                    .load(core::sync::atomic::Ordering::Relaxed)
+            );
 
             // 3. Magic authentication
             let mut auth_req = DrmAuth { magic: 0 };
@@ -564,7 +585,11 @@ mod tests {
                 drm_authmagic(dev, &mut auth_req as *mut _ as *mut _, file1),
                 0
             );
-            assert!((*file2).authenticated);
+            assert!(
+                (*file2)
+                    .authenticated
+                    .load(core::sync::atomic::Ordering::Relaxed)
+            );
 
             // Re-authenticating same magic returns -EINVAL (already consumed)
             assert_eq!(
@@ -596,7 +621,9 @@ mod tests {
             );
 
             // With was_master set, file2 has permission but fails because file1 is already master (-EBUSY)
-            (*file2).was_master = true;
+            (*file2)
+                .was_master
+                .store(true, core::sync::atomic::Ordering::Relaxed);
             assert_eq!(
                 drm_setmaster_ioctl(dev, core::ptr::null_mut(), file2),
                 -EBUSY

@@ -14,16 +14,23 @@ use core::{
 };
 
 use crate::{
-    config::{ENODEV, ERR_PTR},
+    config::{ENODEV, err_ptr},
     shmem::File,
 };
 
-/// Install-once slot for one provider table.
-pub struct ProviderSlot<T: 'static> {
+/// Install-once slot for one cross-thread provider table.
+///
+/// Non-`Sync` tables cannot be published through the safe interface:
+/// ```compile_fail
+/// use core::cell::Cell;
+/// use drm_kapi::kernel_services::ProviderSlot;
+/// let _ = ProviderSlot::<Cell<u32>>::new();
+/// ```
+pub struct ProviderSlot<T: Sync + 'static> {
     table: AtomicPtr<T>,
 }
 
-impl<T: 'static> ProviderSlot<T> {
+impl<T: Sync + 'static> ProviderSlot<T> {
     pub const fn new() -> Self {
         Self {
             table: AtomicPtr::new(ptr::null_mut()),
@@ -59,7 +66,7 @@ impl<T: 'static> ProviderSlot<T> {
     }
 }
 
-impl<T: 'static> Default for ProviderSlot<T> {
+impl<T: Sync + 'static> Default for ProviderSlot<T> {
     fn default() -> Self {
         Self::new()
     }
@@ -83,7 +90,7 @@ pub struct TaskOps {
 #[repr(C)]
 pub struct FileOps {
     /// Linux `anon_inode_getfile()`: a new LinuxKPI shmem file, or an
-    /// `ERR_PTR` on failure. Ownership of the returned file belongs to the
+    /// `err_ptr` on failure. Ownership of the returned file belongs to the
     /// caller until it is transferred to `fd_install` or released with
     /// `shmem::fput_file`.
     pub anon_inode_getfile: unsafe extern "C" fn(
@@ -106,7 +113,7 @@ pub struct FileOps {
 /// Eventfd context operations used for DRM syncobj notifications.
 #[repr(C)]
 pub struct EventfdOps {
-    /// Linux `eventfd_ctx_fdget()`: referenced context or `ERR_PTR(-errno)`.
+    /// Linux `eventfd_ctx_fdget()`: referenced context or `err_ptr(-errno)`.
     pub ctx_fdget: unsafe extern "C" fn(fd: c_int) -> *mut c_void,
     /// Linux eventfd signal operation. `count` is added to the counter.
     pub signal: unsafe extern "C" fn(ctx: *mut c_void, count: u64) -> c_int,
@@ -182,7 +189,7 @@ pub fn current_task_id() -> Option<u64> {
 // ---------------------------------------------------------------------------
 
 /// Linux `anon_inode_getfile()`. Without a file table the result is
-/// `ERR_PTR(-ENODEV)`, which callers check with `IS_ERR`.
+/// `err_ptr(-ENODEV)`, which callers check with `is_err`.
 ///
 /// # Safety
 /// `name` must be a valid NUL-terminated string and `fops` a live file-ops
@@ -201,7 +208,7 @@ pub unsafe extern "C" fn anon_inode_getfile(
             // file-ops table, and `private_data` remains valid for the returned file lifetime.
             unsafe { (ops.anon_inode_getfile)(name, fops, private_data, flags) }
         }
-        None => ERR_PTR(-ENODEV),
+        None => err_ptr(-ENODEV),
     }
 }
 
@@ -264,7 +271,7 @@ pub unsafe extern "C" fn fd_install(fd: c_int, file: *mut File) {
 // Eventfd contexts
 // ---------------------------------------------------------------------------
 
-/// `eventfd_ctx_fdget()`: returns `ERR_PTR(-ENODEV)` without an OS provider.
+/// `eventfd_ctx_fdget()`: returns `err_ptr(-ENODEV)` without an OS provider.
 ///
 /// # Safety
 /// Any installed eventfd provider must remain live and obey the `EventfdOps`
@@ -276,7 +283,7 @@ pub unsafe extern "C" fn eventfd_ctx_fdget(fd: c_int) -> *mut c_void {
             // SAFETY: `ops` is an installed static eventfd ops table whose `ctx_fdget` function pointer is valid.
             unsafe { (ops.ctx_fdget)(fd) }
         }
-        None => ERR_PTR(-ENODEV),
+        None => err_ptr(-ENODEV),
     }
 }
 

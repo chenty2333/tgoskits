@@ -9,7 +9,6 @@
 
 // The Linux ports state the invariant of each C-ABI call once in the module
 // header, as the GT ports do; per-block SAFETY prose is not repeated.
-#![allow(non_snake_case)]
 
 use core::{
     ffi::{c_char, c_void},
@@ -397,8 +396,8 @@ unsafe fn drm_crtc_legacy_gamma_set(
             size_of::<DrmColorLut>() * size as usize,
             core::ptr::null(),
         );
-        if drm_kapi::config::IS_ERR(blob) {
-            ret = drm_kapi::config::PTR_ERR(blob);
+        if drm_kapi::config::is_err(blob) {
+            ret = drm_kapi::config::ptr_err(blob);
             blob = core::ptr::null_mut();
             // goto fail
             drm_atomic_commit_put(state);
@@ -416,8 +415,8 @@ unsafe fn drm_crtc_legacy_gamma_set(
 
         (*state).acquire_ctx = ctx;
         let crtc_state = drm_atomic_get_crtc_state(state, crtc);
-        if drm_kapi::config::IS_ERR(crtc_state) {
-            ret = drm_kapi::config::PTR_ERR(crtc_state);
+        if drm_kapi::config::is_err(crtc_state) {
+            ret = drm_kapi::config::ptr_err(crtc_state);
             drm_atomic_commit_put(state);
             drm_property_blob_put(blob);
             return ret;

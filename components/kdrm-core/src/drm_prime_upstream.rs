@@ -5,12 +5,10 @@
 //! PRIME buffer sharing between devices: handle <-> dma-buf / fd conversions,
 //! prime lookup trees, import and export.
 
-#![allow(non_snake_case)]
-
 use core::ffi::{c_char, c_int, c_uint, c_ulong, c_void};
 
 use drm_kapi::{
-    config::{EINVAL, ENOMEM, EOVERFLOW, GFP_KERNEL, IS_ERR, PAGE_SHIFT, PAGE_SIZE},
+    config::{EINVAL, ENOMEM, EOVERFLOW, GFP_KERNEL, PAGE_SHIFT, PAGE_SIZE, is_err},
     memory::{kfree, kmalloc},
     mutex::{mutex_init, mutex_lock, mutex_unlock},
     rbtree::{rb_erase, rb_insert_color, rb_link_node},
@@ -1019,28 +1017,28 @@ pub unsafe extern "C" fn drm_gem_map_dma_buf(
     direction: c_int,
 ) -> *mut SgTable {
     if attach.is_null() || !(0..=2).contains(&direction) {
-        return drm_kapi::config::ERR_PTR(-EINVAL);
+        return drm_kapi::config::err_ptr(-EINVAL);
     }
     // SAFETY: The retained attachment owns its exporter throughout mapping.
     let (dmabuf, device) = unsafe { ((*attach).dmabuf, (*attach).dev) };
     if dmabuf.is_null() {
-        return drm_kapi::config::ERR_PTR(-EINVAL);
+        return drm_kapi::config::err_ptr(-EINVAL);
     }
     // SAFETY: This callback belongs to GEM exports; reading `r#priv` gives the retained GEM object.
     let object = unsafe { (*dmabuf).r#priv.cast::<DrmGemObject>() };
     // SAFETY: `object` is valid; reading `(*object).funcs` to inspect the driver SG table hook.
     let callback = unsafe { (*object).funcs.as_ref() }.and_then(|ops| ops.get_sg_table);
     let Some(get_sg) = callback else {
-        return drm_kapi::config::ERR_PTR(-38); // Linux ENOSYS
+        return drm_kapi::config::err_ptr(-38); // Linux ENOSYS
     };
     // SAFETY: The object stays referenced; the callback transfers a fresh SG
     // table with physical page identities, not pre-mapped bus addresses.
     let table = unsafe { get_sg(object) };
-    if IS_ERR(table) {
+    if is_err(table) {
         return table;
     }
     if table.is_null() {
-        return drm_kapi::config::ERR_PTR(-ENOMEM);
+        return drm_kapi::config::err_ptr(-ENOMEM);
     }
     // SAFETY: The newly owned table remains live until unmap. The DMA provider
     // validates the importer device and rolls back partial mapping failures.
@@ -1052,7 +1050,7 @@ pub unsafe extern "C" fn drm_gem_map_dma_buf(
             sg_free_table(table);
             kfree(table);
         }
-        return drm_kapi::config::ERR_PTR(result);
+        return drm_kapi::config::err_ptr(result);
     }
     table
 }
@@ -1209,7 +1207,7 @@ pub unsafe extern "C" fn drm_prime_pages_to_sg(
 /// for traversal up to `nents` entries.
 pub unsafe extern "C" fn drm_prime_get_contiguous_size(sgt: *mut SgTable) -> c_ulong {
     // SAFETY: `sgt` is checked non-null and not an error pointer; reading `(*sgt).sgl`.
-    if sgt.is_null() || IS_ERR(sgt) || unsafe { (*sgt).sgl.is_null() } {
+    if sgt.is_null() || is_err(sgt) || unsafe { (*sgt).sgl.is_null() } {
         return 0;
     }
     // SAFETY: `sgt` is valid; reading `(*sgt).nents` total count of scatterlist segments.
@@ -1417,7 +1415,7 @@ pub unsafe extern "C" fn drm_prime_sg_to_page_array(
     pages: *mut *mut c_void,
     max_entries: c_int,
 ) -> c_int {
-    if sgt.is_null() || IS_ERR(sgt) || pages.is_null() || max_entries < 0 {
+    if sgt.is_null() || is_err(sgt) || pages.is_null() || max_entries < 0 {
         return -EINVAL;
     }
     // SAFETY: `sgt` is non-null and not an error pointer; reading head of page-backed scatterlist chain.
@@ -1488,7 +1486,7 @@ pub unsafe extern "C" fn drm_prime_sg_to_dma_addr_array(
     addrs: *mut u64,
     max_entries: c_int,
 ) -> c_int {
-    if sgt.is_null() || IS_ERR(sgt) || addrs.is_null() || max_entries < 0 {
+    if sgt.is_null() || is_err(sgt) || addrs.is_null() || max_entries < 0 {
         return -EINVAL;
     }
     // SAFETY: `sgt` is non-null and not an error pointer; reading head of DMA-mapped scatterlist chain.

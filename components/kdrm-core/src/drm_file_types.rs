@@ -6,11 +6,11 @@
 // size and field offset is pinned by a compile-time assertion.
 //! Linux DRM type definitions. Source headers:
 //! `include/drm/drm_file.h`
-#![allow(non_camel_case_types, non_upper_case_globals, non_snake_case)]
 
 use core::{
     ffi::{c_char, c_void},
     mem::{align_of, size_of},
+    sync::atomic::AtomicBool,
 };
 
 use drm_kapi::{
@@ -46,17 +46,20 @@ pub struct DrmPendingEvent {
 }
 
 #[repr(C, align(8))]
+// Per-open flags may be observed or changed by concurrent ioctls on shared fds.
+// Each scalar is atomic; none publishes unrelated object storage. Master pointers
+// retain their separate device/master lookup lock protocol.
 pub struct DrmFile {
-    pub authenticated: bool,
-    pub stereo_allowed: bool,
-    pub universal_planes: bool,
-    pub atomic: bool,
-    pub aspect_ratio_allowed: bool,
-    pub writeback_connectors: bool,
-    pub plane_color_pipeline: bool,
-    pub was_master: bool,
-    pub is_master: bool,
-    pub supports_virtualized_cursor_plane: bool,
+    pub authenticated: AtomicBool,
+    pub stereo_allowed: AtomicBool,
+    pub universal_planes: AtomicBool,
+    pub atomic: AtomicBool,
+    pub aspect_ratio_allowed: AtomicBool,
+    pub writeback_connectors: AtomicBool,
+    pub plane_color_pipeline: AtomicBool,
+    pub was_master: AtomicBool,
+    pub is_master: AtomicBool,
+    pub supports_virtualized_cursor_plane: AtomicBool,
     pub master: *mut DrmMaster,
     pub master_lookup_lock: Spinlock,
     pub pid: *mut c_void,

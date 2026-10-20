@@ -6,8 +6,6 @@
 //! rejected with EOPNOTSUPP. CRC/debugfs collection and AUX character-device
 //! registration are outside this component and have no exported entry points.
 
-#![allow(non_snake_case, non_camel_case_types, non_upper_case_globals)]
-
 extern crate alloc;
 
 use alloc::format;
@@ -201,12 +199,12 @@ pub const DP_DS_PORT_TYPE_DP_DUALMODE: u8 = 5;
 pub const DP_DS_PORT_TYPE_WIRELESS: u8 = 6;
 
 pub const DP_DS_NON_EDID_MASK: u8 = 0xf0;
-pub const DP_DS_NON_EDID_720x480i_60: u8 = 1 << 4;
-pub const DP_DS_NON_EDID_720x480i_50: u8 = 2 << 4;
-pub const DP_DS_NON_EDID_1920x1080i_60: u8 = 3 << 4;
-pub const DP_DS_NON_EDID_1920x1080i_50: u8 = 4 << 4;
-pub const DP_DS_NON_EDID_1280x720_60: u8 = 5 << 4;
-pub const DP_DS_NON_EDID_1280x720_50: u8 = 7 << 4;
+pub const DP_DS_NON_EDID_720X480I_60: u8 = 1 << 4;
+pub const DP_DS_NON_EDID_720X480I_50: u8 = 2 << 4;
+pub const DP_DS_NON_EDID_1920X1080I_60: u8 = 3 << 4;
+pub const DP_DS_NON_EDID_1920X1080I_50: u8 = 4 << 4;
+pub const DP_DS_NON_EDID_1280X720_60: u8 = 5 << 4;
+pub const DP_DS_NON_EDID_1280X720_50: u8 = 7 << 4;
 
 pub const DP_DS_MAX_BPC_MASK: u8 = 3;
 pub const DP_DS_8BPC: u8 = 0;
@@ -298,7 +296,7 @@ pub const DP_PAYLOAD_ALLOCATE_SET: u32 = 0x1c0;
 
 pub const DP_SINK_COUNT: u32 = 0x200;
 #[inline]
-pub const fn DP_GET_SINK_COUNT(x: u8) -> i32 {
+pub const fn dp_get_sink_count(x: u8) -> i32 {
     (((x & 0x80) >> 1) | (x & 0x3f)) as i32
 }
 
@@ -533,29 +531,29 @@ pub const DP_PHY_LTTPR8: DrmDpPhy = DrmDpPhy::DpPhyLttpr8;
 pub const DP_MAX_LTTPR_COUNT: DrmDpPhy = DrmDpPhy::DpPhyLttpr8;
 
 #[inline]
-pub const fn DP_LTTPR_REG(dp_phy: DrmDpPhy, reg1: u32) -> u32 {
+pub const fn dp_lttpr_reg(dp_phy: DrmDpPhy, reg1: u32) -> u32 {
     let idx = (dp_phy as u32) - (DpPhyLttpr1 as u32);
     0x50 * idx + reg1
 }
 
 #[inline]
-pub const fn DP_TRAINING_AUX_RD_INTERVAL_PHY_REPEATER(dp_phy: DrmDpPhy) -> u32 {
-    DP_LTTPR_REG(dp_phy, DP_TRAINING_AUX_RD_INTERVAL_PHY_REPEATER1)
+pub const fn dp_training_aux_rd_interval_phy_repeater(dp_phy: DrmDpPhy) -> u32 {
+    dp_lttpr_reg(dp_phy, DP_TRAINING_AUX_RD_INTERVAL_PHY_REPEATER1)
 }
 
 #[inline]
-pub const fn DP_128B132B_TRAINING_AUX_RD_INTERVAL_PHY_REPEATER(dp_phy: DrmDpPhy) -> u32 {
-    DP_LTTPR_REG(dp_phy, 0xf0022)
+pub const fn dp_128b132b_training_aux_rd_interval_phy_repeater(dp_phy: DrmDpPhy) -> u32 {
+    dp_lttpr_reg(dp_phy, 0xf0022)
 }
 
 #[inline]
-pub const fn DP_LANE0_1_STATUS_PHY_REPEATER(dp_phy: DrmDpPhy) -> u32 {
-    DP_LTTPR_REG(dp_phy, DP_LANE0_1_STATUS_PHY_REPEATER1)
+pub const fn dp_lane0_1_status_phy_repeater(dp_phy: DrmDpPhy) -> u32 {
+    dp_lttpr_reg(dp_phy, DP_LANE0_1_STATUS_PHY_REPEATER1)
 }
 
 #[inline]
-pub const fn DP_OUI_PHY_REPEATER(dp_phy: DrmDpPhy) -> u32 {
-    DP_LTTPR_REG(dp_phy, DP_OUI_PHY_REPEATER1)
+pub const fn dp_oui_phy_repeater(dp_phy: DrmDpPhy) -> u32 {
+    dp_lttpr_reg(dp_phy, DP_OUI_PHY_REPEATER1)
 }
 
 // ---------------------------------------------------------------------------
@@ -896,14 +894,14 @@ unsafe fn __read_delay(
         }
     } else {
         if uhbr {
-            offset = DP_128B132B_TRAINING_AUX_RD_INTERVAL_PHY_REPEATER(dp_phy);
+            offset = dp_128b132b_training_aux_rd_interval_phy_repeater(dp_phy);
             mask = DP_128B132B_TRAINING_AUX_RD_INTERVAL_MASK;
             parse = __128b132b_channel_eq_delay_us;
         } else {
             if cr {
                 return 100;
             }
-            offset = DP_TRAINING_AUX_RD_INTERVAL_PHY_REPEATER(dp_phy);
+            offset = dp_training_aux_rd_interval_phy_repeater(dp_phy);
             mask = DP_TRAINING_AUX_RD_MASK;
             parse = __8b10b_channel_eq_delay_us;
         }
@@ -1477,7 +1475,7 @@ pub unsafe extern "C" fn drm_dp_dpcd_read_phy_link_status(
     let ret = unsafe {
         drm_dp_dpcd_read_data(
             aux,
-            DP_LANE0_1_STATUS_PHY_REPEATER(dp_phy),
+            dp_lane0_1_status_phy_repeater(dp_phy),
             link_status as *mut c_void,
             DP_LINK_STATUS_SIZE - 1,
         )
@@ -2251,12 +2249,12 @@ pub unsafe extern "C" fn drm_dp_downstream_mode(
     match port_cap_slice[0] & DP_DS_PORT_TYPE_MASK {
         DP_DS_PORT_TYPE_NON_EDID => {
             let vic: u8 = match port_cap_slice[0] & DP_DS_NON_EDID_MASK {
-                DP_DS_NON_EDID_720x480i_60 => 6,
-                DP_DS_NON_EDID_720x480i_50 => 21,
-                DP_DS_NON_EDID_1920x1080i_60 => 5,
-                DP_DS_NON_EDID_1920x1080i_50 => 20,
-                DP_DS_NON_EDID_1280x720_60 => 4,
-                DP_DS_NON_EDID_1280x720_50 => 19,
+                DP_DS_NON_EDID_720X480I_60 => 6,
+                DP_DS_NON_EDID_720X480I_50 => 21,
+                DP_DS_NON_EDID_1920X1080I_60 => 5,
+                DP_DS_NON_EDID_1920X1080I_50 => 20,
+                DP_DS_NON_EDID_1280X720_60 => 4,
+                DP_DS_NON_EDID_1280X720_50 => 19,
                 _ => return ptr::null_mut(),
             };
             // SAFETY: `dev` is a valid `DrmDevice` per the function's safety contract.
@@ -2360,7 +2358,7 @@ pub unsafe extern "C" fn drm_dp_read_sink_count_cap(
     // SAFETY: `dpcd` is readable for `DP_RECEIVER_CAP_SIZE` bytes per the function's safety contract.
     let dpcd_slice = unsafe { core::slice::from_raw_parts(dpcd, DP_RECEIVER_CAP_SIZE) };
     // SAFETY: `connector` is initialized per the function's safety contract.
-    (unsafe { (*connector).connector_type }) != DRM_MODE_CONNECTOR_eDP as i32
+    (unsafe { (*connector).connector_type }) != DRM_MODE_CONNECTOR_EDP as i32
         && dpcd_slice[DP_DPCD_REV as usize] >= DP_DPCD_REV_11
         && (dpcd_slice[DP_DOWNSTREAMPORT_PRESENT as usize] & DP_DWN_STRM_PORT_PRESENT) != 0
         // SAFETY: `desc` is a valid `DrmDpDesc` per the function's safety contract.
@@ -2378,7 +2376,7 @@ pub unsafe extern "C" fn drm_dp_read_sink_count(aux: *mut DrmDpAux) -> c_int {
     if ret < 0 {
         return ret;
     }
-    DP_GET_SINK_COUNT(count)
+    dp_get_sink_count(count)
 }
 
 // ---------------------------------------------------------------------------
@@ -2949,7 +2947,7 @@ pub unsafe extern "C" fn drm_dp_dump_lttpr_desc(aux: *mut DrmDpAux, dp_phy: DrmD
         quirks: 0,
     };
     // SAFETY: `aux` is valid per the function's safety contract; `desc.ident` is a live local.
-    let ret = unsafe { drm_dp_read_ident(aux, DP_OUI_PHY_REPEATER(dp_phy), &mut desc.ident) };
+    let ret = unsafe { drm_dp_read_ident(aux, dp_oui_phy_repeater(dp_phy), &mut desc.ident) };
     if ret < 0 {
         return ret;
     }
@@ -3298,7 +3296,7 @@ pub unsafe extern "C" fn drm_dp_read_lttpr_phy_caps(
         drm_dp_read_lttpr_regs(
             aux,
             dpcd,
-            DP_TRAINING_AUX_RD_INTERVAL_PHY_REPEATER(dp_phy),
+            dp_training_aux_rd_interval_phy_repeater(dp_phy),
             caps,
             DP_LTTPR_PHY_CAP_SIZE,
         )
@@ -3821,10 +3819,10 @@ pub unsafe extern "C" fn drm_dp_vsc_sdp_pack(vsc: *const DrmDpVscSdp, sdp: *mut 
 
     // SAFETY: `sdp` is writable and `vsc` is readable per the function's safety contract.
     unsafe {
-        (*sdp).sdp_header.HB0 = 0;
-        (*sdp).sdp_header.HB1 = (*vsc).sdp_type;
-        (*sdp).sdp_header.HB2 = (*vsc).revision;
-        (*sdp).sdp_header.HB3 = (*vsc).length;
+        (*sdp).sdp_header.hb0 = 0;
+        (*sdp).sdp_header.hb1 = (*vsc).sdp_type;
+        (*sdp).sdp_header.hb2 = (*vsc).revision;
+        (*sdp).sdp_header.hb3 = (*vsc).length;
     }
 
     // SAFETY: `vsc` is readable per the function's safety contract.
@@ -4701,66 +4699,75 @@ mod tests {
     /// `msg` must point to an initialized, writable `DrmDpAuxMsg` whose `buffer`
     /// satisfies read/write requirements for `(*msg).size` bytes.
     unsafe extern "C" fn mock_aux_transfer(_aux: *mut DrmDpAux, msg: *mut DrmDpAuxMsg) -> isize {
-        let ctx = &mut *mock_ctx_ptr();
+        // SAFETY: The fixture gives each libtest thread its own live context;
+        // the synchronous callback exclusively accesses its request record.
+        let ctx = unsafe { &mut *mock_ctx_ptr() };
+        // SAFETY: The AUX caller retains this initialized request until return.
+        let msg = unsafe { &mut *msg };
         ctx.call_count += 1;
-        ctx.last_request = (*msg).request;
-        ctx.last_address = (*msg).address;
-        ctx.last_size = (*msg).size;
+        ctx.last_request = msg.request;
+        ctx.last_address = msg.address;
+        ctx.last_size = msg.size;
 
-        let req_cmd = (*msg).request & !(DP_AUX_I2C_MOT | DP_AUX_I2C_WRITE_STATUS_UPDATE);
+        let req_cmd = msg.request & !(DP_AUX_I2C_MOT | DP_AUX_I2C_WRITE_STATUS_UPDATE);
 
         if req_cmd == DP_AUX_NATIVE_WRITE {
-            (*msg).reply = ctx.reply;
-            if !(*msg).buffer.is_null() && (*msg).size > 0 {
-                let len = (*msg).size.min(128);
-                core::ptr::copy_nonoverlapping(
-                    (*msg).buffer as *const u8,
-                    ctx.data.as_mut_ptr(),
-                    len,
-                );
+            msg.reply = ctx.reply;
+            if !msg.buffer.is_null() && msg.size > 0 {
+                let len = msg.size.min(128);
+                // SAFETY: The request supplies size readable bytes; len is
+                // bounded by that size and the context's 128-byte storage.
+                let bytes = unsafe { core::slice::from_raw_parts(msg.buffer.cast::<u8>(), len) };
+                ctx.data[..len].copy_from_slice(bytes);
             }
             if ctx.ret != 0 {
                 ctx.ret
             } else {
-                (*msg).size as isize
+                msg.size as isize
             }
         } else if req_cmd == DP_AUX_NATIVE_READ {
-            (*msg).reply = ctx.reply;
-            if !(*msg).buffer.is_null() && (*msg).size > 0 {
-                let len = (*msg).size.min(128);
-                core::ptr::copy_nonoverlapping(ctx.data.as_ptr(), (*msg).buffer as *mut u8, len);
+            msg.reply = ctx.reply;
+            if !msg.buffer.is_null() && msg.size > 0 {
+                let len = msg.size.min(128);
+                // SAFETY: A read request supplies size writable bytes.
+                let bytes =
+                    unsafe { core::slice::from_raw_parts_mut(msg.buffer.cast::<u8>(), len) };
+                bytes.copy_from_slice(&ctx.data[..len]);
             }
             if ctx.ret != 0 {
                 ctx.ret
             } else {
-                (*msg).size as isize
+                msg.size as isize
             }
         } else if req_cmd == DP_AUX_I2C_READ {
             if ctx.i2c_defer_remain > 0 {
                 ctx.i2c_defer_remain -= 1;
-                (*msg).reply = DP_AUX_I2C_REPLY_DEFER;
+                msg.reply = DP_AUX_I2C_REPLY_DEFER;
                 0
             } else {
-                (*msg).reply = DP_AUX_I2C_REPLY_ACK;
-                if !(*msg).buffer.is_null() && (*msg).size > 0 {
-                    let len = (*msg).size.min(128);
-                    for k in 0..len {
-                        *((*msg).buffer as *mut u8).add(k) = (k as u8).wrapping_add(0x40);
+                msg.reply = DP_AUX_I2C_REPLY_ACK;
+                if !msg.buffer.is_null() && msg.size > 0 {
+                    let len = msg.size.min(128);
+                    // SAFETY: The read request supplies size writable bytes.
+                    let bytes =
+                        unsafe { core::slice::from_raw_parts_mut(msg.buffer.cast::<u8>(), len) };
+                    for (k, byte) in bytes.iter_mut().enumerate() {
+                        *byte = (k as u8).wrapping_add(0x40);
                     }
                 }
-                (*msg).size as isize
+                msg.size as isize
             }
         } else if req_cmd == DP_AUX_I2C_WRITE {
             if ctx.i2c_defer_remain > 0 {
                 ctx.i2c_defer_remain -= 1;
-                (*msg).reply = DP_AUX_I2C_REPLY_DEFER;
+                msg.reply = DP_AUX_I2C_REPLY_DEFER;
                 0
             } else {
-                (*msg).reply = DP_AUX_I2C_REPLY_ACK;
-                (*msg).size as isize
+                msg.reply = DP_AUX_I2C_REPLY_ACK;
+                msg.size as isize
             }
         } else {
-            (*msg).reply = ctx.reply;
+            msg.reply = ctx.reply;
             ctx.ret
         }
     }

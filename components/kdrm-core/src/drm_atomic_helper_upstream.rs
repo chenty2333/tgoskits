@@ -6,13 +6,11 @@
 //! default implementations of check and commit functions, legacy helper
 //! emulations, nonblocking commit sequencing, suspend/resume helpers, etc.
 
-#![allow(non_snake_case, non_camel_case_types, non_upper_case_globals)]
-
 use core::{ffi::c_void, mem::offset_of};
 
 use drm_kapi::{
     completion::Completion,
-    config::{EBUSY, EINVAL, ENOMEM, EOPNOTSUPP, ERANGE, ERR_PTR, GFP_KERNEL, HZ, IS_ERR, PTR_ERR},
+    config::{EBUSY, EINVAL, ENOMEM, EOPNOTSUPP, ERANGE, GFP_KERNEL, HZ, err_ptr, is_err, ptr_err},
     locks::{spin_lock_irqsave_raw, spin_lock_raw, spin_unlock_irqrestore_raw, spin_unlock_raw},
     memory::{kref_get, kref_init, kref_put},
     types::{ListHead, WorkStruct},
@@ -373,8 +371,8 @@ unsafe fn handle_conflicting_encoders(
 
             let new_conn_state =
                 crate::drm_atomic_upstream::drm_atomic_get_connector_state(state, connector);
-            if IS_ERR(new_conn_state) {
-                ret = PTR_ERR(new_conn_state);
+            if is_err(new_conn_state) {
+                ret = ptr_err(new_conn_state);
                 break;
             }
 
@@ -1082,8 +1080,8 @@ pub unsafe extern "C" fn drm_atomic_helper_check_wb_connector_state(
     unsafe {
         let conn_state =
             crate::drm_atomic_upstream::drm_atomic_get_new_connector_state(state, connector);
-        if IS_ERR(conn_state) {
-            return PTR_ERR(conn_state);
+        if is_err(conn_state) {
+            return ptr_err(conn_state);
         }
         if conn_state.is_null() {
             return -EINVAL;
@@ -2309,7 +2307,7 @@ pub unsafe extern "C" fn drm_atomic_helper_commit(
         drm_atomic_commit_get(state);
         if nonblock {
             drm_kapi::workqueue::queue_work(
-                drm_kapi::workqueue::system_dfl_wq,
+                drm_kapi::workqueue::SYSTEM_DFL_WQ,
                 core::ptr::addr_of_mut!((*state).commit_work),
             );
         } else {
@@ -3554,8 +3552,8 @@ pub unsafe extern "C" fn drm_atomic_helper_update_plane(
 
         (*state).acquire_ctx = ctx;
         let plane_state = crate::drm_atomic_upstream::drm_atomic_get_plane_state(state, plane);
-        if IS_ERR(plane_state) {
-            let ret = PTR_ERR(plane_state);
+        if is_err(plane_state) {
+            let ret = ptr_err(plane_state);
             crate::drm_atomic_upstream::drm_atomic_commit_put(state);
             return ret;
         }
@@ -3608,8 +3606,8 @@ pub unsafe extern "C" fn drm_atomic_helper_disable_plane(
 
         (*state).acquire_ctx = ctx;
         let plane_state = crate::drm_atomic_upstream::drm_atomic_get_plane_state(state, plane);
-        if IS_ERR(plane_state) {
-            let ret = PTR_ERR(plane_state);
+        if is_err(plane_state) {
+            let ret = ptr_err(plane_state);
             crate::drm_atomic_upstream::drm_atomic_commit_put(state);
             return ret;
         }
@@ -3701,8 +3699,8 @@ pub unsafe extern "C" fn drm_atomic_helper_disable_all(
                 .sub(offset_of!(DrmCrtc, head))
                 .cast::<DrmCrtc>();
             let crtc_state = crate::drm_atomic_upstream::drm_atomic_get_crtc_state(state, crtc);
-            if IS_ERR(crtc_state) {
-                ret = PTR_ERR(crtc_state);
+            if is_err(crtc_state) {
+                ret = ptr_err(crtc_state);
                 crate::drm_atomic_upstream::drm_atomic_commit_put(state);
                 return ret;
             }
@@ -3800,8 +3798,8 @@ pub unsafe extern "C" fn drm_atomic_helper_reset_crtc(
 
         (*state).acquire_ctx = ctx;
         let crtc_state = crate::drm_atomic_upstream::drm_atomic_get_crtc_state(state, crtc);
-        if IS_ERR(crtc_state) {
-            let ret = PTR_ERR(crtc_state);
+        if is_err(crtc_state) {
+            let ret = ptr_err(crtc_state);
             crate::drm_atomic_upstream::drm_atomic_commit_put(state);
             return ret;
         }
@@ -3865,7 +3863,7 @@ pub unsafe extern "C" fn drm_atomic_helper_duplicate_state(
     unsafe {
         let state = crate::drm_atomic_upstream::drm_atomic_commit_alloc(dev);
         if state.is_null() {
-            return ERR_PTR(-ENOMEM);
+            return err_ptr(-ENOMEM);
         }
 
         (*state).acquire_ctx = ctx;
@@ -3879,10 +3877,10 @@ pub unsafe extern "C" fn drm_atomic_helper_duplicate_state(
                 .sub(offset_of!(DrmCrtc, head))
                 .cast::<DrmCrtc>();
             let crtc_state = crate::drm_atomic_upstream::drm_atomic_get_crtc_state(state, crtc);
-            if IS_ERR(crtc_state) {
-                let err = PTR_ERR(crtc_state);
+            if is_err(crtc_state) {
+                let err = ptr_err(crtc_state);
                 crate::drm_atomic_upstream::drm_atomic_commit_put(state);
-                return ERR_PTR(err);
+                return err_ptr(err);
             }
             cur = (*cur).next;
         }
@@ -3892,10 +3890,10 @@ pub unsafe extern "C" fn drm_atomic_helper_duplicate_state(
         while plane_cur != plane_head {
             let plane = (plane_cur as *mut u8).sub(8) as *mut DrmPlane;
             let plane_state = crate::drm_atomic_upstream::drm_atomic_get_plane_state(state, plane);
-            if IS_ERR(plane_state) {
-                let err = PTR_ERR(plane_state);
+            if is_err(plane_state) {
+                let err = ptr_err(plane_state);
                 crate::drm_atomic_upstream::drm_atomic_commit_put(state);
-                return ERR_PTR(err);
+                return err_ptr(err);
             }
 
             if !(*plane_state).color_pipeline.is_null() {
@@ -3903,7 +3901,7 @@ pub unsafe extern "C" fn drm_atomic_helper_duplicate_state(
                     crate::drm_atomic_upstream::drm_atomic_add_affected_colorops(state, plane);
                 if err != 0 {
                     crate::drm_atomic_upstream::drm_atomic_commit_put(state);
-                    return ERR_PTR(err);
+                    return err_ptr(err);
                 }
             }
             plane_cur = (*plane_cur).next;
@@ -3919,11 +3917,11 @@ pub unsafe extern "C" fn drm_atomic_helper_duplicate_state(
 
             let conn_state =
                 crate::drm_atomic_upstream::drm_atomic_get_connector_state(state, conn);
-            if IS_ERR(conn_state) {
-                let err = PTR_ERR(conn_state);
+            if is_err(conn_state) {
+                let err = ptr_err(conn_state);
                 crate::drm_connector_upstream::drm_connector_list_iter_end(&mut conn_iter);
                 crate::drm_atomic_upstream::drm_atomic_commit_put(state);
-                return ERR_PTR(err);
+                return err_ptr(err);
             }
         }
         crate::drm_connector_upstream::drm_connector_list_iter_end(&mut conn_iter);
@@ -3939,13 +3937,13 @@ pub unsafe extern "C" fn drm_atomic_helper_duplicate_state(
 /// - `dev` must point to an active `DrmDevice` entering system suspend.
 /// - Must be called in sleepable task context without holding modeset locks (initializes its own acquire context).
 /// - On success, returns an owned `*mut DrmAtomicCommit` storing pre-suspend state to be restored by `drm_atomic_helper_resume`.
-/// - On failure, returns an error pointer (`ERR_PTR(-errno)`).
+/// - On failure, returns an error pointer (`err_ptr(-errno)`).
 pub unsafe extern "C" fn drm_atomic_helper_suspend(dev: *mut DrmDevice) -> *mut DrmAtomicCommit {
     // SAFETY: `dev` is non-null. `drm_atomic_helper_suspend` initializes its own modeset context,
     // saves active state via `duplicate_state`, and disables all outputs via `disable_all`.
     unsafe {
         let mut ctx: DrmModesetAcquireCtx = core::mem::zeroed();
-        let mut state: *mut DrmAtomicCommit = ERR_PTR(-EINVAL);
+        let mut state: *mut DrmAtomicCommit = err_ptr(-EINVAL);
         let mut ret: i32;
 
         crate::drm_modeset_lock_upstream::drm_modeset_acquire_init(&mut ctx, 0);
@@ -3953,14 +3951,14 @@ pub unsafe extern "C" fn drm_atomic_helper_suspend(dev: *mut DrmDevice) -> *mut 
             ret = crate::drm_modeset_lock_upstream::drm_modeset_lock_all_ctx(dev, &mut ctx);
             if ret == 0 {
                 state = drm_atomic_helper_duplicate_state(dev, &mut ctx);
-                if !IS_ERR(state) {
+                if !is_err(state) {
                     ret = drm_atomic_helper_disable_all(dev, &mut ctx);
                     if ret < 0 {
                         crate::drm_atomic_upstream::drm_atomic_commit_put(state);
-                        state = ERR_PTR(ret);
+                        state = err_ptr(ret);
                     }
                 } else {
-                    ret = PTR_ERR(state);
+                    ret = ptr_err(state);
                 }
             }
             if ret == -drm_kapi::config::EDEADLK {
@@ -3974,8 +3972,8 @@ pub unsafe extern "C" fn drm_atomic_helper_suspend(dev: *mut DrmDevice) -> *mut 
         crate::drm_modeset_lock_upstream::drm_modeset_drop_locks(&mut ctx);
         crate::drm_modeset_lock_upstream::drm_modeset_acquire_fini(&mut ctx);
 
-        if ret != 0 && !IS_ERR(state) {
-            return ERR_PTR(ret);
+        if ret != 0 && !is_err(state) {
+            return err_ptr(ret);
         }
         state
     }
@@ -4047,7 +4045,7 @@ pub unsafe extern "C" fn drm_atomic_helper_commit_duplicated_state(
 #[unsafe(no_mangle)]
 /// # Safety
 /// - `dev` must point to the resuming `DrmDevice`.
-/// - If `state` is null or an error pointer (`IS_ERR(state)`), returns 0 without action.
+/// - If `state` is null or an error pointer (`is_err(state)`), returns 0 without action.
 /// - Otherwise, `state` must be the valid `DrmAtomicCommit` returned by `drm_atomic_helper_suspend`.
 /// - Must be called in sleepable task context without modeset locks held.
 /// - Automatically releases the `state` reference upon completion.
@@ -4101,16 +4099,16 @@ unsafe fn page_flip_common(
     unsafe {
         let plane = (*crtc).primary;
         let crtc_state = crate::drm_atomic_upstream::drm_atomic_get_crtc_state(state, crtc);
-        if IS_ERR(crtc_state) {
-            return PTR_ERR(crtc_state);
+        if is_err(crtc_state) {
+            return ptr_err(crtc_state);
         }
 
         (*crtc_state).event = event;
         (*crtc_state).async_flip = (flags & DRM_MODE_PAGE_FLIP_ASYNC) != 0;
 
         let plane_state = crate::drm_atomic_upstream::drm_atomic_get_plane_state(state, plane);
-        if IS_ERR(plane_state) {
-            return PTR_ERR(plane_state);
+        if is_err(plane_state) {
+            return ptr_err(plane_state);
         }
 
         let ret = crate::drm_atomic_uapi_upstream::drm_atomic_set_crtc_for_plane(plane_state, crtc);
@@ -4426,7 +4424,7 @@ mod pre_swap_tests {
         let mode: DrmDisplayMode = unsafe { zeroed() };
         // SAFETY: `encoder.bridge_chain` is a valid mutable list head being initialized.
         unsafe {
-            drm_kapi::list::INIT_LIST_HEAD(core::ptr::addr_of_mut!(encoder.bridge_chain));
+            drm_kapi::list::init_list_head(core::ptr::addr_of_mut!(encoder.bridge_chain));
         }
 
         assert_eq!(
@@ -4577,10 +4575,10 @@ mod pre_swap_tests {
         unsafe {
             drm_kapi::mutex::mutex_init(core::ptr::addr_of_mut!((*dev).filelist_mutex));
             drm_kapi::locks::spin_lock_init(&mut (*dev).event_lock);
-            drm_kapi::list::INIT_LIST_HEAD(core::ptr::addr_of_mut!((*dev).filelist));
-            drm_kapi::list::INIT_LIST_HEAD(core::ptr::addr_of_mut!(file.lhead));
-            drm_kapi::list::INIT_LIST_HEAD(core::ptr::addr_of_mut!(file.pending_event_list));
-            drm_kapi::list::INIT_LIST_HEAD(core::ptr::addr_of_mut!(file.event_list));
+            drm_kapi::list::init_list_head(core::ptr::addr_of_mut!((*dev).filelist));
+            drm_kapi::list::init_list_head(core::ptr::addr_of_mut!(file.lhead));
+            drm_kapi::list::init_list_head(core::ptr::addr_of_mut!(file.pending_event_list));
+            drm_kapi::list::init_list_head(core::ptr::addr_of_mut!(file.event_list));
             drm_kapi::wait::init_waitqueue_head(&mut file.event_wait);
             drm_kapi::mutex::mutex_init(core::ptr::addr_of_mut!(file.event_read_lock));
             file.event_space = 4096;

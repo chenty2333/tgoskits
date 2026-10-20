@@ -8,8 +8,6 @@
 //! The `idr_*` helpers are exported to `drm_connector_upstream.rs` and
 //! `drm_mode_config_upstream.rs` (tile and object ids) through `pub(crate)`.
 
-#![allow(non_snake_case)]
-
 use core::{
     ffi::{c_ulong, c_void},
     mem::{MaybeUninit, offset_of, size_of},
@@ -738,8 +736,12 @@ pub unsafe extern "C" fn drm_mode_obj_get_properties_ioctl(
             }
             let ret = drm_mode_object_get_properties(
                 obj,
-                (*file_priv).atomic,
-                (*file_priv).plane_color_pipeline,
+                (*file_priv)
+                    .atomic
+                    .load(core::sync::atomic::Ordering::Relaxed),
+                (*file_priv)
+                    .plane_color_pipeline
+                    .load(core::sync::atomic::Ordering::Relaxed),
                 (*arg).props_ptr as usize as *mut u32,
                 (*arg).prop_values_ptr as usize as *mut u64,
                 core::ptr::addr_of_mut!((*arg).count_props),

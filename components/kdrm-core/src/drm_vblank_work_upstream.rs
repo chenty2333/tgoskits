@@ -8,7 +8,6 @@
 
 // The Linux ports state the invariant of each C-ABI call once in the module
 // header, as the GT ports do; per-block SAFETY prose is not repeated.
-#![allow(non_snake_case)]
 
 use alloc::string::String;
 use core::fmt::Write as _;
@@ -17,7 +16,7 @@ use drm_kapi::{
     kthread::{
         self, KthreadWork, cancel_work_sync, flush_work, flush_worker, queue_work, run_worker,
     },
-    list::{INIT_LIST_HEAD, list_add_tail, list_del_init, list_empty},
+    list::{init_list_head, list_add_tail, list_del_init, list_empty},
     locks::{
         spin_lock_irq_raw, spin_lock_irqsave_raw, spin_lock_raw, spin_unlock_irq_raw,
         spin_unlock_irqrestore_raw, spin_unlock_raw,
@@ -318,11 +317,11 @@ pub unsafe extern "C" fn drm_vblank_work_init(
     func: unsafe extern "C" fn(*mut KthreadWork),
 ) {
     // SAFETY: `work` points to writable, unaliased memory for `DrmVblankWork`. `kthread::init_work`
-    // initializes `(*work).base`, `INIT_LIST_HEAD` initializes `(*work).node`, and `drm_crtc_vblank_crtc`
+    // initializes `(*work).base`, `init_list_head` initializes `(*work).node`, and `drm_crtc_vblank_crtc`
     // retrieves the valid vblank structure associated with `crtc`.
     unsafe {
         kthread::init_work(core::ptr::addr_of_mut!((*work).base), func);
-        INIT_LIST_HEAD(core::ptr::addr_of_mut!((*work).node));
+        init_list_head(core::ptr::addr_of_mut!((*work).node));
         (*work).vblank = drm_crtc_vblank_crtc(crtc);
     }
 }
@@ -339,7 +338,7 @@ pub unsafe fn drm_vblank_worker_init(vblank: *mut DrmVblankCrtc) -> i32 {
     // and `work_wait_queue` sets up empty synchronization structures. Reading `(*(*(*vblank).dev).primary).index`
     // accesses initialized device fields to name the thread, and storing `worker` into `(*vblank).worker` completes setup.
     unsafe {
-        INIT_LIST_HEAD(core::ptr::addr_of_mut!((*vblank).pending_work));
+        init_list_head(core::ptr::addr_of_mut!((*vblank).pending_work));
         init_waitqueue_head(&mut (*vblank).work_wait_queue);
 
         let primary_index = (*(*(*vblank).dev).primary).index;

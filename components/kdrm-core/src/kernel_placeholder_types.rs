@@ -6,8 +6,6 @@
 // size and field offset is pinned by a compile-time assertion.
 //! Linux DRM type definitions. Source headers:
 
-#![allow(non_camel_case_types, non_upper_case_globals, non_snake_case)]
-
 use core::mem::size_of;
 
 /// Sized placeholder for `i2c_adapter`: only its size and alignment are relied on here.

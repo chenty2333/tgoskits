@@ -5,7 +5,6 @@
 // are transcribed from the source header rather than represented as opaque
 // storage, so driver callback ABI remains inspectable and type checked.
 //! Linux simple-KMS display-pipe callback and object definitions.
-#![allow(non_camel_case_types, non_upper_case_globals, non_snake_case)]
 
 use core::{
     ffi::c_void,

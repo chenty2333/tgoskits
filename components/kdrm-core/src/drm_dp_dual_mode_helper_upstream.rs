@@ -2,8 +2,6 @@
 // Copyright 2026 TheKernel contributors. See ../LICENSE-MIT.
 //! Port of Linux `drivers/gpu/drm/display/drm_dp_dual_mode_helper.c`.
 
-#![allow(non_snake_case, non_camel_case_types, non_upper_case_globals)]
-
 extern crate alloc;
 
 use alloc::vec::Vec;

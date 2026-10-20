@@ -5,7 +5,6 @@
 use alloc::sync::Arc;
 use core::{mem::offset_of, ptr, sync::atomic::AtomicU32};
 
-use ax_gpu::MappableBacking;
 use ax_memory_addr::{MemoryAddr, PhysAddrRange};
 use drm_kapi::{
     config::PAGE_SIZE,
@@ -28,16 +27,17 @@ const NEG_EACCES: i32 = -drm_kapi::config::EACCES;
 ///
 /// Keep this object (normally inside `DeviceMmap`'s `Arc` retainer) until all
 /// forked and cloned VMAs have closed. The retained GEM reference prevents
-/// object teardown; the mapping Arc pins the physical DMA allocation.
+/// object teardown, including its DMA backing or host BAR lease.
 pub struct MmapLease {
     physical: PhysAddrRange,
-    mapping: Arc<MappableBacking>,
+    cached: bool,
     gem: usize,
     _device: Arc<device::DeviceOwner>,
 }
 
-// SAFETY: The lease contains immutable physical metadata and an Arc-backed
-// DMA allocation. The GEM pointer is held by an owned DRM reference; its only
+// SAFETY: The lease contains immutable physical metadata and an owned GEM
+// reference that pins its backing or BAR lease. The GEM pointer
+// has no other dereferences here; its only
 // use after construction is the matching final put in Drop.
 unsafe impl Send for MmapLease {}
 // SAFETY: Shared access only reads immutable range/allocation state. The GEM
@@ -50,9 +50,9 @@ impl MmapLease {
         self.physical
     }
 
-    /// Retain the same GPU allocation for an exported DMA-BUF mapping.
-    pub fn mapping(&self) -> &Arc<MappableBacking> {
-        &self.mapping
+    /// Whether the device requires a normal cacheable shared-memory mapping.
+    pub fn cached(&self) -> bool {
+        self.cached
     }
 }
 
@@ -147,7 +147,7 @@ pub unsafe fn mmap(file: *mut DrmFile, offset: u64, length: u64) -> Result<MmapL
         return Err(NEG_EINVAL);
     }
     // SAFETY: `obj` is non-null and holds a live GEM reference acquired during lookup; `(*obj).size` is valid to read.
-    let (object_size, mapping) = unsafe { ((*obj).size, gem::map_backing(obj)) };
+    let (object_size, mapping) = unsafe { ((*obj).size, gem::cpu_mapping(obj)) };
     let Some(mapping) = mapping else {
         // SAFETY: `obj` holds the GEM reference acquired during lookup; release it on error.
         unsafe { drm_gem_object_put(obj) };
@@ -178,7 +178,7 @@ pub unsafe fn mmap(file: *mut DrmFile, offset: u64, length: u64) -> Result<MmapL
         .is_none_or(|end| end > object_size)
         || object_offset
             .checked_add(request_len)
-            .is_none_or(|end| end > mapping.backing().len())
+            .is_none_or(|end| end > mapping.physical.size())
     {
         // SAFETY: Releases the GEM reference acquired during lookup on this error path.
         unsafe { drm_gem_object_put(obj) };
@@ -218,7 +218,7 @@ pub unsafe fn mmap_gem_object(
         return Err(NEG_EINVAL);
     }
     // SAFETY: `obj` has a live GEM reference acquired above.
-    let mapping = gem::map_backing(obj);
+    let mapping = gem::cpu_mapping(obj);
     let Some(mapping) = mapping else {
         // SAFETY: Releases the newly acquired GEM reference on error.
         unsafe { drm_gem_object_put(obj) };
@@ -228,7 +228,7 @@ pub unsafe fn mmap_gem_object(
     let size = unsafe { (*obj).size };
     if relative
         .checked_add(length)
-        .is_none_or(|end| end > size || end > mapping.backing().len())
+        .is_none_or(|end| end > size || end > mapping.physical.size())
     {
         // SAFETY: Releases the newly acquired GEM reference on error.
         unsafe { drm_gem_object_put(obj) };
@@ -239,11 +239,11 @@ pub unsafe fn mmap_gem_object(
 
 fn lease_for_object(
     obj: *mut DrmGemObject,
-    mapping: Arc<MappableBacking>,
+    mapping: gem::CpuMapping,
     offset: usize,
     length: usize,
 ) -> Result<MmapLease, i32> {
-    let physical = mapping.physical();
+    let physical = mapping.physical;
     let start = physical.start.checked_add(offset).ok_or_else(|| {
         // SAFETY: Releases the held GEM reference on error.
         unsafe { drm_gem_object_put(obj) };
@@ -257,7 +257,7 @@ fn lease_for_object(
     };
     Ok(MmapLease {
         physical: range,
-        mapping,
+        cached: mapping.cached,
         gem: obj as usize,
         _device: owner,
     })

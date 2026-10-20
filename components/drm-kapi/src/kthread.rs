@@ -17,7 +17,7 @@ use core::{
 
 use crate::{
     config::{EAGAIN, ENODEV, ENOMEM},
-    list::{INIT_LIST_HEAD, list_add_tail, list_del_init, list_empty},
+    list::{init_list_head, list_add_tail, list_del_init, list_empty},
     locks::{spin_lock_irqsave_raw, spin_unlock_irqrestore_raw},
     memory::{kfree, kmalloc},
     task_runtime::{self, TaskEntry, TaskSchedulingPolicy},
@@ -131,7 +131,7 @@ pub unsafe fn init_work(work: *mut KthreadWork, func: KthreadWorkFn) {
     assert!(!work.is_null());
     // SAFETY: Caller guarantees `work` is non-null, aligned, writable, and not queued or running.
     unsafe {
-        INIT_LIST_HEAD(ptr::addr_of_mut!((*work).node));
+        init_list_head(ptr::addr_of_mut!((*work).node));
         (*work).func = Some(func);
         (*work).worker = ptr::null_mut();
         (*work).canceling = 0;
@@ -165,7 +165,7 @@ fn run_worker_with_policy(
     // SAFETY: `worker` was allocated via `kmalloc` above with capacity for `KthreadWorker`.
     unsafe {
         ptr::write(worker, KthreadWorker::new());
-        INIT_LIST_HEAD(ptr::addr_of_mut!((*worker).work_list));
+        init_list_head(ptr::addr_of_mut!((*worker).work_list));
     }
 
     let worker_addr = worker as usize;

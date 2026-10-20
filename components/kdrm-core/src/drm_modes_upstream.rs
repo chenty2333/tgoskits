@@ -1422,7 +1422,7 @@ fn drm_mode_status_name(status: DrmModeStatus) -> Option<&'static core::ffi::CSt
 /// This function is safe to call with any [`DrmModeStatus`] value. It returns a pointer to a
 /// static, null-terminated C string with `'static` lifetime.
 pub unsafe extern "C" fn drm_get_mode_status_name(status: DrmModeStatus) -> *const c_char {
-    // index = status + 3 must lie in [0, ARRAY_SIZE(drm_mode_status_names)) = [0, 40)
+    // index = status + 3 must lie in [0, array_size(drm_mode_status_names)) = [0, 40)
     let index = status + 3;
     if warn_on(!(0..40).contains(&index)) {
         return c"".as_ptr();

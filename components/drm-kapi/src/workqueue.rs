@@ -22,8 +22,6 @@
 //! The executor must be initialized from blockable task context before work
 //! can run; items queued earlier wait on the FIFO.
 
-#![allow(non_snake_case)]
-
 use alloc::{boxed::Box, string::String};
 use core::{
     ffi::c_void,
@@ -121,25 +119,22 @@ const _: () = assert!(core::mem::align_of::<WorkqueueStruct>() > WORK_PENDING);
 
 static SYSTEM_DEFAULT_WORKQUEUE: WorkqueueStruct = WorkqueueStruct::new(WQ_DFL_ACTIVE);
 static SYSTEM_HIGHPRI_WORKQUEUE: WorkqueueStruct = WorkqueueStruct::new(WQ_DFL_ACTIVE);
-
-#[allow(non_upper_case_globals)]
-pub const system_dfl_wq: *mut WorkqueueStruct =
+pub const SYSTEM_DFL_WQ: *mut WorkqueueStruct =
     core::ptr::addr_of!(SYSTEM_DEFAULT_WORKQUEUE).cast_mut();
-#[allow(non_upper_case_globals)]
-pub const system_highpri_wq: *mut WorkqueueStruct =
+pub const SYSTEM_HIGHPRI_WQ: *mut WorkqueueStruct =
     core::ptr::addr_of!(SYSTEM_HIGHPRI_WORKQUEUE).cast_mut();
 
 /// A workqueue pointer published as a C data symbol.
 #[repr(transparent)]
 pub struct ExportedWorkqueue(*mut WorkqueueStruct);
-// SAFETY: `ExportedWorkqueue` wraps a pointer to an immutable static `WorkqueueStruct` (`system_dfl_wq`).
+// SAFETY: `ExportedWorkqueue` wraps a pointer to an immutable static `WorkqueueStruct` (`SYSTEM_DFL_WQ`).
 // Its internal fields are synchronized via atomic variables and `WORK_QUEUE`, making shared concurrent access safe.
 unsafe impl Sync for ExportedWorkqueue {}
 
-/// Linux `struct workqueue_struct *system_dfl_wq` (kernel/workqueue.c), read
+/// Linux `struct workqueue_struct *SYSTEM_DFL_WQ` (kernel/workqueue.c), read
 /// by C-ABI callers such as DRM drivers.
-#[unsafe(export_name = "system_dfl_wq")]
-pub static SYSTEM_DFL_WQ_SYMBOL: ExportedWorkqueue = ExportedWorkqueue(system_dfl_wq);
+#[unsafe(export_name = "SYSTEM_DFL_WQ")]
+pub static SYSTEM_DFL_WQ_SYMBOL: ExportedWorkqueue = ExportedWorkqueue(SYSTEM_DFL_WQ);
 
 /// Failure from an operation which needs the asynchronous work runtime.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -152,7 +147,7 @@ pub enum WorkqueueError {
     WaitFailed,
     /// The caller supplied a null work item or workqueue handle.
     NullPointer,
-    /// The work item was queued before `INIT_WORK` installed its callback.
+    /// The work item was queued before `init_work` installed its callback.
     WorkNotInitialized,
 }
 
@@ -617,7 +612,7 @@ unsafe fn work_data<'a>(work: *mut WorkStruct) -> &'a AtomicUsize {
 /// Initialize `work_struct` for a non-capturing safe Rust callback taking
 /// `&mut WorkStruct`. Function items and non-capturing closures are zero-sized;
 /// capturing closures are rejected rather than retaining borrowed state.
-pub fn INIT_WORK<F>(work: &mut WorkStruct, function: F)
+pub fn init_work<F>(work: &mut WorkStruct, function: F)
 where
     F: for<'a> Fn(&'a mut WorkStruct) + Copy + Send + 'static,
 {
@@ -625,7 +620,7 @@ where
     assert_eq!(
         core::mem::size_of::<F>(),
         0,
-        "INIT_WORK requires a non-capturing callback"
+        "init_work requires a non-capturing callback"
     );
     let _ = function;
     work.data = WORK_DATA_INIT as core::ffi::c_ulong;
@@ -644,7 +639,7 @@ where
     F: for<'a> Fn(&'a mut WorkStruct) + Copy + Send + 'static,
 {
     assert!(!work.is_null());
-    // The only zero-sized Fn values accepted by INIT_WORK are function items
+    // The only zero-sized Fn values accepted by init_work are function items
     // and non-capturing closures, whose value has no runtime storage.
     // SAFETY: `F` is constrained to zero-sized non-capturing types, so zeroed uninit is safe to assume_init.
     let function = unsafe { core::mem::MaybeUninit::<F>::zeroed().assume_init() };
@@ -653,7 +648,7 @@ where
 }
 
 /// Initialize a work item with an actual C-ABI callback.
-pub fn INIT_WORK_C(work: &mut WorkStruct, function: unsafe extern "C" fn(*mut WorkStruct)) {
+pub fn init_work_c(work: &mut WorkStruct, function: unsafe extern "C" fn(*mut WorkStruct)) {
     let _ = init_workqueue_executor();
     work.data = WORK_DATA_INIT as core::ffi::c_ulong;
     let entry = ptr::addr_of_mut!(work.entry);
@@ -684,11 +679,11 @@ unsafe extern "C" fn delayed_work_timer_fn(timer: *mut TimerList) {
 
 /// Initialize Linux `delayed_work`: work callback plus a timer-list callback.
 /// The timer backend is monotonic and asynchronous; delay units are jiffies.
-pub fn INIT_DELAYED_WORK<F>(delayed: &mut DelayedWork, function: F)
+pub fn init_delayed_work<F>(delayed: &mut DelayedWork, function: F)
 where
     F: for<'a> Fn(&'a mut WorkStruct) + Copy + Send + 'static,
 {
-    INIT_WORK(&mut delayed.work, function);
+    init_work(&mut delayed.work, function);
     // SAFETY: `delayed` is a live `DelayedWork` reference.
     unsafe { delayed_workqueue_atomic(delayed) }.store(ptr::null_mut(), Ordering::Release);
     delayed.cpu = -1;
@@ -700,7 +695,7 @@ where
 ///
 /// # Safety
 /// `workqueue` must identify a live workqueue and `delayed` must point to a
-/// live `DelayedWork` initialized by `INIT_DELAYED_WORK`. Keep its storage and
+/// live `DelayedWork` initialized by `init_delayed_work`. Keep its storage and
 /// callback state alive until `cancel_delayed_work_sync` or
 /// `flush_delayed_work` completes; do not modify its embedded timer, work
 /// links, or callback while it is queued or running.
@@ -737,7 +732,7 @@ pub unsafe fn queue_delayed_work<Q: WorkqueuePtr, D: DelayedWorkPtr>(
 ///
 /// # Safety
 /// `workqueue` must identify a live workqueue and `delayed` must point to a
-/// live `DelayedWork` initialized by `INIT_DELAYED_WORK`. Keep its storage and
+/// live `DelayedWork` initialized by `init_delayed_work`. Keep its storage and
 /// callback state alive until `cancel_delayed_work_sync` or
 /// `flush_delayed_work` completes; do not modify its embedded timer, work
 /// links, or callback while it is queued or running.
@@ -770,7 +765,7 @@ pub unsafe fn mod_delayed_work<Q: WorkqueuePtr, D: DelayedWorkPtr>(
 ///
 /// # Safety
 /// `delayed` must point to a live `DelayedWork` initialized by
-/// `INIT_DELAYED_WORK`. This is non-synchronous: retain the object and callback
+/// `init_delayed_work`. This is non-synchronous: retain the object and callback
 /// state until a running callback has returned, using
 /// `cancel_delayed_work_sync` when that guarantee is needed.
 pub unsafe fn cancel_delayed_work<D: DelayedWorkPtr>(delayed: D) -> bool {
@@ -787,7 +782,7 @@ pub unsafe fn cancel_delayed_work<D: DelayedWorkPtr>(delayed: D) -> bool {
 ///
 /// # Safety
 /// `delayed` must point to a live `DelayedWork` initialized by
-/// `INIT_DELAYED_WORK` and remain allocated through this call. The caller must
+/// `init_delayed_work` and remain allocated through this call. The caller must
 /// be in blockable task context and must not cancel this work from its own
 /// callback.
 pub unsafe fn cancel_delayed_work_sync<D: DelayedWorkPtr>(delayed: D) -> bool {
@@ -1491,8 +1486,8 @@ pub unsafe extern "C" fn alloc_workqueue(
 pub unsafe extern "C" fn destroy_workqueue(wq: *mut c_void) {
     assert!(!wq.is_null(), "destroy_workqueue(NULL)");
     assert!(
-        wq.cast::<WorkqueueStruct>() != system_dfl_wq
-            && wq.cast::<WorkqueueStruct>() != system_highpri_wq,
+        wq.cast::<WorkqueueStruct>() != SYSTEM_DFL_WQ
+            && wq.cast::<WorkqueueStruct>() != SYSTEM_HIGHPRI_WQ,
         "destroy_workqueue on a system workqueue"
     );
     flush_workqueue_items(wq.cast());
@@ -1519,9 +1514,9 @@ mod tests {
     }
 
     fn new_work() -> alloc::boxed::Box<WorkStruct> {
-        // SAFETY: Zeroing `WorkStruct` produces a valid initial bit pattern before `INIT_WORK_C`.
+        // SAFETY: Zeroing `WorkStruct` produces a valid initial bit pattern before `init_work_c`.
         let mut work = alloc::boxed::Box::new(unsafe { core::mem::zeroed::<WorkStruct>() });
-        INIT_WORK_C(&mut work, test_callback);
+        init_work_c(&mut work, test_callback);
         work
     }
 
@@ -1571,15 +1566,15 @@ mod tests {
         let _serial = serial();
         let mut work = core::mem::MaybeUninit::<WorkStruct>::zeroed();
         let work_ptr = work.as_mut_ptr();
-        // SAFETY: `work_ptr` points to valid storage on stack initialized by `INIT_WORK_C`.
+        // SAFETY: `work_ptr` points to valid storage on stack initialized by `init_work_c`.
         unsafe {
-            INIT_WORK_C(&mut *work_ptr, test_callback);
+            init_work_c(&mut *work_ptr, test_callback);
             assert!(!work_pending(work_ptr));
             // Queuing succeeds even when worker is unstarted / cannot block
-            assert_eq!(try_queue_work(system_dfl_wq, work_ptr), Ok(true));
+            assert_eq!(try_queue_work(SYSTEM_DFL_WQ, work_ptr), Ok(true));
             assert!(work_pending(work_ptr));
             // Re-queuing returns Ok(false) because it's already pending
-            assert_eq!(try_queue_work(system_dfl_wq, work_ptr), Ok(false));
+            assert_eq!(try_queue_work(SYSTEM_DFL_WQ, work_ptr), Ok(false));
             // Cancellation successfully removes it from queue and clears pending
             assert!(cancel_work(work_ptr));
             assert!(!work_pending(work_ptr));
@@ -1592,10 +1587,10 @@ mod tests {
         let _serial = serial();
         let mut work = core::mem::MaybeUninit::<WorkStruct>::zeroed();
         let work_ptr = work.as_mut_ptr();
-        // SAFETY: `work_ptr` points to valid storage on stack initialized by `INIT_WORK_C`.
+        // SAFETY: `work_ptr` points to valid storage on stack initialized by `init_work_c`.
         unsafe {
-            INIT_WORK_C(&mut *work_ptr, test_callback);
-            assert!(try_queue_work(system_dfl_wq, work_ptr).is_ok());
+            init_work_c(&mut *work_ptr, test_callback);
+            assert!(try_queue_work(SYSTEM_DFL_WQ, work_ptr).is_ok());
             let _ = cancel_work(work_ptr);
             assert!(!work_pending(work_ptr));
         }
@@ -1651,8 +1646,8 @@ mod tests {
         );
         // SAFETY: `first` and `second` are live valid `WorkStruct`s.
         unsafe {
-            assert!(queue_work(system_dfl_wq, first));
-            assert!(queue_work(system_dfl_wq, second));
+            assert!(queue_work(SYSTEM_DFL_WQ, first));
+            assert!(queue_work(SYSTEM_DFL_WQ, second));
         }
         assert_eq!(take_work(0), first);
         assert_eq!(take_work(1), second);
@@ -1667,12 +1662,12 @@ mod tests {
         let mut work = new_work();
         let work = &mut *work as *mut WorkStruct;
         // SAFETY: `work` is a live valid `WorkStruct`.
-        unsafe { assert!(queue_work(system_dfl_wq, work)) };
+        unsafe { assert!(queue_work(SYSTEM_DFL_WQ, work)) };
         assert_eq!(take_work(0), work);
         // SAFETY: `work` is a live valid `WorkStruct`.
         assert!(!unsafe { work_pending(work) });
         // SAFETY: `work` is a live valid `WorkStruct`.
-        unsafe { assert!(queue_work(system_dfl_wq, work)) };
+        unsafe { assert!(queue_work(SYSTEM_DFL_WQ, work)) };
         assert!(
             take_work(1).is_null(),
             "work item ran on two workers at once"
