@@ -199,7 +199,9 @@ capset 以版本 0 探测，包括 Venus；`HOST_VISIBLE` 只在 blob/context �
 
 宿主测试验证公共对象、引用、同步与拒绝规则，不能证明真实调度或设备完成。既有 Starry
 DRM version、modeset、atomic 和 per-buffer 用例验证实际文件、用户内存和映射边界；同步
-生命周期用例验证 syncobj、sync_file 和 eventfd。virgl 应用验证设备专属 ioctl 和渲染链路。
+生命周期用例验证 syncobj、sync_file 和 eventfd。virgl 应用验证设备专属 ioctl 和渲染链路，
+并以活动 CRTC 的 NONBLOCK out-fence 作为 `EXECBUF` 输入依赖，验证无 `SA_RESTART` 时的
+`EINTR`、带 `SA_RESTART` 时的内核重启，以及输入 syncobj 成功 reset 对重复提交的约束。
 
 四个受影响目标至少通过公共组件的项目静态检查，QEMU 按实际设备路径验证。验证命令、
 实际结果和未验证范围在提交说明中记录；没有运行的目标、真实 Intel 硬件和 Venus 宿主

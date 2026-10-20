@@ -41,7 +41,8 @@ done
 mkdir -p "$overlay/usr/bin" "$overlay/usr/share"
 linker_dir="$(dirname "$(command -v ld.lld)")"
 x86_64-linux-musl-gcc -B"$linker_dir/" -fuse-ld=lld --sysroot="$stage" -std=c11 -Wall -Wextra -Werror \
-    "$STARRY_APP_DIR/main.c" -L"$stage/usr/lib" -Wl,-rpath-link,"$stage/usr/lib" \
+    "$STARRY_APP_DIR/main.c" "$STARRY_APP_DIR/execbuf_signal.c" \
+    -L"$stage/usr/lib" -Wl,-rpath-link,"$stage/usr/lib" \
     -lvulkan -o "$overlay/usr/bin/venus-regression"
 cp -a --reflink=auto "$stage/lib" "$overlay/"
 cp -a --reflink=auto "$stage/usr/lib" "$overlay/usr/"

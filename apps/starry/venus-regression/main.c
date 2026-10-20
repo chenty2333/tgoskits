@@ -13,6 +13,8 @@
 #include <libdrm/virtgpu_drm.h>
 #include <vulkan/vulkan.h>
 
+#include "execbuf_signal.h"
+
 #define REQUIRE(ok) do { if (!(ok)) { fprintf(stderr, "VENUS_REGRESSION_FAILED line=%d errno=%d\n", __LINE__, errno); exit(1); } } while (0)
 #define VK_OK(call) do { VkResult result = (call); if (result != VK_SUCCESS) { fprintf(stderr, "VENUS_REGRESSION_FAILED line=%d api=%s result=%d\n", __LINE__, #call, result); exit(1); } } while (0)
 
@@ -154,6 +156,7 @@ int main(void)
     const char *icd = getenv("VK_DRIVER_FILES");
     REQUIRE(icd && strstr(icd, "/virtio_icd"));
     repeated_gem_lifetime();
+    execbuf_signal_test();
     vulkan_transfer_readback();
     puts("VENUS_REGRESSION_PASSED");
     return 0;

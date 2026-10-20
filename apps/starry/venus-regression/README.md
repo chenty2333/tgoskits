@@ -1,7 +1,7 @@
-# Venus 与 VirGL 资源回收回归
+# Venus、VirGL 资源回收与 EXECBUF 信号回归
 
-在具有可读写 `/dev/dri/renderD128`、KVM 及支持 Venus 的 QEMU/virglrenderer 的
-x86_64 主机上运行。QEMU 必须为 11 或更新版本；配置显式开启
+在具有可读写 `/dev/dri/renderD128`、`/dev/dri/card0`、KVM 及支持 Venus 的
+QEMU/virglrenderer 的 x86_64 主机上运行。QEMU 必须为 11 或更新版本；配置显式开启
 `kvm,honor-guest-pat=on`，Intel xe 的 host-visible 映射还要求宿主 Linux 6.16+。
 这是 [Mesa Venus 的平台要求](https://docs.mesa3d.org/drivers/venus.html)，不是关闭
 fence-feedback 的替代方案。
@@ -18,6 +18,15 @@ cargo xtask starry app qemu -t venus-regression --arch x86_64 --cap virgl
 关闭后 VMA 仍有效。随后在同一 Vulkan device 上反复分配 host-visible 内存，提交
 真实 `vkCmdFillBuffer`，等待 fence 并逐字回读，再释放资源和映射。失败必须传递到
 最外层运行器。普通不具备主机 GPU 的 CI 不声明 `virgl` 能力，不执行此应用。
+
+GEM 回收之后、Vulkan 回读之前，应用还会用活动 CRTC 上带 `OUT_FENCE_PTR` 的
+NONBLOCK page flip 作为未完成输入 fence，验证真实 `EXECBUF` 的阻塞等待：
+`SIGUSR1` 到达时，没有 `SA_RESTART` 的 ioctl 返回 `-1/EINTR`；带 `SA_RESTART`
+的 ioctl 在两次信号分别打断等待后由内核重启，并在 fence 完成后成功返回，用户态
+不手动重试。
+输入 syncobj 路径使用 `VIRTGPU_EXECBUF_SYNCOBJ_RESET`，成功后 syncobj 被清空，
+证明命令只提交一次。每个用例都通过 pipe 就绪、`/proc/<pid>/stat` 睡眠状态和有界
+超时区分“信号先于 ioctl”“ioctl 已完成”和“真正打断阻塞等待”。
 
 宿主可通过标准的 `VK_DRIVER_FILES` 显式选择 Lavapipe 后端。此时客户机仍运行
 Venus，设备名可能包含 `Virtio-GPU Venus (llvmpipe ...)`；这是宿主软件实现，不是
