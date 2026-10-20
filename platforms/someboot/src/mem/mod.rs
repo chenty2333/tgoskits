@@ -196,6 +196,9 @@ pub(crate) fn _fixmap_io(paddr: usize) -> *mut u8 {
 }
 
 pub(crate) fn early_init() {
+    #[cfg(efi)]
+    crate::efi_stub::init_boot_memory_map();
+    #[cfg(not(efi))]
     crate::fdt::init_memory_map();
 
     let kernel_range = kimage_range();
@@ -273,7 +276,7 @@ pub(crate) fn memory_map_setup() {
 
     let ram_range = ram::used_range();
     if !ram_range.is_empty() {
-        let desc = MemoryDescriptor::new_with_range(ram_range, MemoryType::Reserved);
+        let desc = MemoryDescriptor::new_with_range(ram_range, MemoryType::BootData);
         add_memory_descriptor(desc).unwrap();
     }
     if let Some(desc) = crate::console::debug_to_memory_desc() {
@@ -305,4 +308,24 @@ pub(crate) fn add_memory_descriptor(
 
 pub fn virtual_address_space() -> Result<VirtualAddressSpaceLayout, VirtualAddressSpaceError> {
     Arch::virtual_address_space()
+}
+
+/// # Safety
+/// Boot CPU only, after installing its own stack, page tables, exception vectors
+/// and CPU-local area, before publishing platform RAM lists or starting SMP.
+/// No earlier `memory_map()` borrow may remain reachable across this mutation.
+#[cfg(all(efi, target_arch = "loongarch64"))]
+pub unsafe fn complete_boot_takeover() {
+    crate::handoff::received::loongarch64::complete_takeover();
+}
+#[cfg(not(all(efi, target_arch = "loongarch64")))]
+/// # Safety
+/// Same early-boot boundary as the inherited EFI implementation.
+pub unsafe fn complete_boot_takeover() {}
+
+#[cfg(all(efi, target_arch = "loongarch64"))]
+pub(crate) fn replace_boot_map(map: MemoryMap) {
+    // SAFETY: the receiver calls once before any platform memory cache is built.
+    // Early bootstrap readers no longer retain a borrowed map.
+    unsafe { MEMORY_MAP.update(|current| *current = map) };
 }

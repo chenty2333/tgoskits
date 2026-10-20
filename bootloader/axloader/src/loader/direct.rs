@@ -5,9 +5,17 @@ extern crate alloc;
 use alloc::{boxed::Box, format, vec::Vec};
 use core::ptr;
 
-use axloader::{integrity::decode_sha256, ota::OtaController};
+use axloader::{
+    http_control::{
+        MAX_HEADER_BYTES, Route, error_status, parse_head, route, validate_body_length,
+    },
+    integrity::decode_sha256,
+    ota::OtaController,
+    target::X86_64,
+};
 use httpboot_protocol::{
-    BootArch, DEVICE_PROTOCOL_VERSION, DeviceBootJob, LoaderDeviceStatus, OtaSource,
+    DEVICE_PROTOCOL_VERSION, DeviceBootJob, LoaderDeviceStatus, MAX_HTTP_BOOT_INITRAMFS_BYTES,
+    OtaSource,
 };
 use uefi::{
     Event, Handle, Status, StatusExt,
@@ -29,7 +37,6 @@ use super::boot_server::{BootExecution, BootServer, FileKind};
 
 const TCP4_BINDING_GUID: uefi::Guid = uefi::guid!("00720665-67eb-4a99-baf7-d3c33a1c7cc9");
 const TCP4_GUID: uefi::Guid = uefi::guid!("65530bc7-a359-410f-b010-5aadc7ec2b62");
-const MAX_HEADER: usize = 4096;
 const IO_WAIT_POLLS: usize = 3000;
 
 #[derive(Debug)]
@@ -367,10 +374,10 @@ impl<'a> Connection<'a> {
         ota: &mut Option<OtaController>,
         boot_server: &mut BootServer,
     ) -> uefi::Result<Action> {
-        let mut header = [0; MAX_HEADER + 1];
+        let mut header = [0; MAX_HEADER_BYTES + 1];
         let mut used = 0;
         let header_end = loop {
-            if used >= MAX_HEADER {
+            if used >= MAX_HEADER_BYTES {
                 self.reply("431 Request Header Fields Too Large", b"{}")?;
                 return Ok(Action::None);
             }
@@ -383,86 +390,51 @@ impl<'a> Connection<'a> {
                 .windows(4)
                 .position(|part| part == b"\r\n\r\n")
             {
-                if index + 4 > MAX_HEADER {
+                if index + 4 > MAX_HEADER_BYTES {
                     self.reply("431 Request Header Fields Too Large", b"{}")?;
                     return Ok(Action::None);
                 }
                 break index + 4;
             }
         };
-        let request =
-            core::str::from_utf8(&header[..header_end]).map_err(|_| Status::INVALID_PARAMETER)?;
-        let Some(first) = request.split("\r\n").next() else {
-            return Ok(Action::None);
-        };
-        let mut words = first.split_ascii_whitespace();
-        let (Some(method), Some(path), Some("HTTP/1.1" | "HTTP/1.0"), None) =
-            (words.next(), words.next(), words.next(), words.next())
-        else {
-            self.reply("400 Bad Request", b"{}")?;
-            return Ok(Action::None);
-        };
-        let mut content_length = None;
-        let mut sha256 = None;
-        let mut display_version = None;
-        let mut update_id = None;
-        let mut source = OtaSource::Direct;
-        let mut epoch = None;
-        let mut serial_binding = None;
-        for line in request.split("\r\n").skip(1) {
-            if line.is_empty() {
-                break;
-            }
-            let Some((key, value)) = line.split_once(':') else {
-                self.reply("400 Bad Request", b"{}")?;
+        let (head, parsed_header_end) = match parse_head(&header[..used]) {
+            Ok(value) => value,
+            Err(error) => {
+                self.reply(error_status(error), b"{}")?;
                 return Ok(Action::None);
-            };
-            let value = value.trim();
-            if key.eq_ignore_ascii_case("content-length") {
-                if content_length
-                    .replace(
-                        value
-                            .parse::<usize>()
-                            .map_err(|_| Status::INVALID_PARAMETER)?,
-                    )
-                    .is_some()
-                {
-                    self.reply("400 Bad Request", b"{}")?;
-                    return Ok(Action::None);
-                }
-            } else if key.eq_ignore_ascii_case("transfer-encoding") {
-                self.reply("400 Bad Request", b"{}")?;
-                return Ok(Action::None);
-            } else if key.eq_ignore_ascii_case("x-image-sha256") {
-                sha256 = decode_sha256(value);
-            } else if key.eq_ignore_ascii_case("x-image-version") {
-                if value.len() > 96 || !value.bytes().all(|byte| byte.is_ascii_graphic()) {
-                    self.reply("400 Bad Request", b"{}")?;
-                    return Ok(Action::None);
-                }
-                display_version = Some(value);
-            } else if key.eq_ignore_ascii_case("x-update-id") {
-                update_id = Some(value);
-            } else if key.eq_ignore_ascii_case("x-update-source") {
-                if value != "server" {
-                    self.reply("400 Bad Request", b"{}")?;
-                    return Ok(Action::None);
-                }
-                source = OtaSource::Server;
-            } else if key.eq_ignore_ascii_case("x-serial-binding") {
-                serial_binding = Some(value);
-            } else if key.eq_ignore_ascii_case("x-boot-epoch") {
-                epoch = Some(value);
             }
-        }
+        };
+        debug_assert_eq!(parsed_header_end, header_end);
+        let method = head.method.as_str();
+        let path = head.path.as_str();
+        let selected_route = route(method, path);
+        let content_length = Some(head.content_length);
         let initial = &header[header_end..used];
-        if method == "GET" && path == "/api/v1/status" {
+        if let Err(error) = validate_body_length(
+            method,
+            path,
+            head.content_length,
+            initial.len(),
+            MAX_HTTP_BOOT_INITRAMFS_BYTES,
+        ) {
+            self.reply(error_status(error), b"{}")?;
+            return Ok(Action::None);
+        }
+        if let Err(error) = selected_route.check_admission(
+            head.header("x-boot-epoch"),
+            boot_server.epoch(),
+            ota.as_ref().is_some_and(OtaController::trial),
+        ) {
+            self.reply(error.status(), error.body())?;
+            return Ok(Action::None);
+        }
+        if selected_route == Route::DeviceStatus {
             let body = serde_json::to_vec(&LoaderDeviceStatus {
                 protocol_version: DEVICE_PROTOCOL_VERSION,
                 boot_epoch: boot_server.epoch().into(),
                 mac_address: boot_server.mac_address(),
                 current_mac_address: boot_server.current_mac_address(),
-                arch: BootArch::X86_64,
+                arch: X86_64.boot_arch,
                 loader_version: env!("CARGO_PKG_VERSION").into(),
                 hardware: boot_server.hardware().clone(),
                 boot: boot_server.status(),
@@ -473,7 +445,7 @@ impl<'a> Connection<'a> {
             self.reply("200 OK", &body)?;
             return Ok(Action::None);
         }
-        if method == "GET" && path == "/api/v1/ota/status" {
+        if selected_route == Route::OtaStatus {
             let Some(ota) = ota.as_ref() else {
                 self.reply("503 Service Unavailable", b"{}")?;
                 return Ok(Action::None);
@@ -484,8 +456,7 @@ impl<'a> Connection<'a> {
             )?;
             return Ok(Action::None);
         }
-        if method == "GET" && path.starts_with("/api/v1/boot/jobs/") {
-            let id = &path["/api/v1/boot/jobs/".len()..];
+        if let Route::BootJobStatus { id } = selected_route {
             if boot_server.descriptor(id, FileKind::Kernel).is_err() {
                 self.reply("404 Not Found", b"{}")?;
             } else {
@@ -496,11 +467,7 @@ impl<'a> Connection<'a> {
             }
             return Ok(Action::None);
         }
-        if epoch != Some(boot_server.epoch()) {
-            self.reply("409 Conflict", br#"{"error":"stale_boot_epoch"}"#)?;
-            return Ok(Action::None);
-        }
-        if method == "POST" && path == "/api/v1/serial/continue" {
+        if selected_route == Route::SerialContinue {
             let Some(length) = content_length.filter(|n| *n > 0 && *n <= 1024) else {
                 self.reply("400 Bad Request", b"{}")?;
                 return Ok(Action::None);
@@ -526,9 +493,7 @@ impl<'a> Connection<'a> {
             )?;
             return Ok(Action::None);
         }
-        if method == "DELETE"
-            && let Some(id) = path.strip_prefix("/api/v1/serial/bindings/")
-        {
+        if let Route::SerialBindingRevoke { id } = selected_route {
             let result = boot_server.serial.borrow_mut().revoke(id);
             self.reply(
                 if result.is_ok() {
@@ -541,7 +506,7 @@ impl<'a> Connection<'a> {
             return Ok(Action::None);
         }
         if let Some(ota) = ota.as_mut() {
-            if method == "POST" && path == "/api/v1/ota/confirm" {
+            if selected_route == Route::OtaConfirm {
                 let Some(length) = content_length.filter(|size| *size > 0 && *size <= 1024) else {
                     self.reply("400 Bad Request", b"{}")?;
                     return Ok(Action::None);
@@ -553,6 +518,13 @@ impl<'a> Connection<'a> {
                     .get("update_id")
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or("");
+                let source = match head.ota_source() {
+                    Ok(source) => source,
+                    Err(_) => {
+                        self.reply("400 Bad Request", b"{}")?;
+                        return Ok(Action::None);
+                    }
+                };
                 if ota.confirm(id, source).is_err() {
                     self.reply("409 Conflict", b"{}")?;
                 } else {
@@ -563,7 +535,7 @@ impl<'a> Connection<'a> {
                 }
                 return Ok(Action::None);
             }
-            if method == "PUT" && path == "/api/v1/ota/image" {
+            if selected_route == Route::OtaImage {
                 if boot_server.busy() {
                     self.reply("409 Conflict", br#"{"error":"boot_job_busy"}"#)?;
                     return Ok(Action::None);
@@ -574,7 +546,7 @@ impl<'a> Connection<'a> {
                     self.reply("413 Payload Too Large", b"{}")?;
                     return Ok(Action::None);
                 };
-                let Some(expected) = sha256 else {
+                let Some(expected) = head.ota_image_sha256() else {
                     self.reply("400 Bad Request", b"{}")?;
                     return Ok(Action::None);
                 };
@@ -582,9 +554,22 @@ impl<'a> Connection<'a> {
                     self.reply("400 Bad Request", b"{}")?;
                     return Ok(Action::None);
                 }
+                let source = match head.ota_source() {
+                    Ok(source) => source,
+                    Err(_) => {
+                        self.reply("400 Bad Request", b"{}")?;
+                        return Ok(Action::None);
+                    }
+                };
+                let display_version = match head.ota_image_version() {
+                    Ok(version) => version,
+                    Err(_) => {
+                        self.reply("400 Bad Request", b"{}")?;
+                        return Ok(Action::None);
+                    }
+                };
                 let id = if source == OtaSource::Server {
-                    let Some(id) = update_id.and_then(|value| value.as_bytes().try_into().ok())
-                    else {
+                    let Some(id) = head.ota_update_id() else {
                         self.reply("400 Bad Request", b"{}")?;
                         return Ok(Action::None);
                     };
@@ -637,15 +622,8 @@ impl<'a> Connection<'a> {
             self.reply("503 Service Unavailable", b"{}")?;
             return Ok(Action::None);
         }
-        if ota.as_ref().is_some_and(OtaController::trial) {
-            self.reply(
-                "409 Conflict",
-                br#"{"error":"ota_trial_requires_confirmation"}"#,
-            )?;
-            return Ok(Action::None);
-        }
-        if method == "POST" && path == "/api/v1/boot/jobs" {
-            let Some(length) = content_length.filter(|size| *size > 0 && *size <= MAX_HEADER)
+        if selected_route == Route::BootJobCreate {
+            let Some(length) = content_length.filter(|size| *size > 0 && *size <= MAX_HEADER_BYTES)
             else {
                 self.reply("400 Bad Request", b"{}")?;
                 return Ok(Action::None);
@@ -669,64 +647,56 @@ impl<'a> Connection<'a> {
             )?;
             return Ok(Action::None);
         }
-        if let Some(tail) = path.strip_prefix("/api/v1/boot/jobs/") {
-            let (id, operation) = tail.split_once('/').unwrap_or((tail, ""));
-            if method == "DELETE" && operation.is_empty() {
-                let status = if boot_server.cancel(id).is_ok() {
-                    "204 No Content"
-                } else {
-                    "404 Not Found"
-                };
-                self.reply(status, b"")?;
+        if let Route::BootJobCancel { id } = selected_route {
+            let status = if boot_server.cancel(id).is_ok() {
+                "204 No Content"
+            } else {
+                "404 Not Found"
+            };
+            self.reply(status, b"")?;
+            return Ok(Action::None);
+        }
+        if let Route::BootJobUpload { id, kind } = selected_route {
+            let Ok(descriptor) = boot_server.descriptor(id, kind) else {
+                self.reply("404 Not Found", b"{}")?;
+                return Ok(Action::None);
+            };
+            if content_length != Some(descriptor.size as usize)
+                || head.ota_image_sha256() != decode_sha256(&descriptor.sha256)
+            {
+                let _ = boot_server.cancel(id);
+                self.reply("400 Bad Request", b"{}")?;
                 return Ok(Action::None);
             }
-            if method == "PUT" && (operation == "kernel" || operation == "initramfs") {
-                let kind = if operation == "kernel" {
-                    FileKind::Kernel
-                } else {
-                    FileKind::Initramfs
-                };
-                let Ok(descriptor) = boot_server.descriptor(id, kind) else {
-                    self.reply("404 Not Found", b"{}")?;
-                    return Ok(Action::None);
-                };
-                if content_length != Some(descriptor.size as usize)
-                    || sha256 != decode_sha256(&descriptor.sha256)
-                {
+            let data = match self.read_body(descriptor.size as usize, initial) {
+                Ok(data) => data,
+                Err(error) => {
                     let _ = boot_server.cancel(id);
-                    self.reply("400 Bad Request", b"{}")?;
-                    return Ok(Action::None);
+                    return Err(error);
                 }
-                let data = match self.read_body(descriptor.size as usize, initial) {
-                    Ok(data) => data,
-                    Err(error) => {
-                        let _ = boot_server.cancel(id);
-                        return Err(error);
-                    }
-                };
-                let result = boot_server.upload(id, kind, data);
-                self.reply(
-                    if result.is_ok() {
-                        "200 OK"
-                    } else {
-                        "422 Unprocessable Content"
-                    },
-                    &serde_json::to_vec(&boot_server.status()).map_err(|_| Status::ABORTED)?,
-                )?;
-                return Ok(Action::None);
-            }
-            if method == "POST" && operation == "start" {
-                match boot_server.prepare(id, serial_binding) {
-                    Ok(execution) => {
-                        self.reply("202 Accepted", br#"{"phase":"ready_to_handoff"}"#)?;
-                        return Ok(Action::Boot(alloc::boxed::Box::new(execution)));
-                    }
-                    Err(error) => {
-                        let body = serde_json::to_vec(&serde_json::json!({"error": error}))
-                            .map_err(|_| Status::ABORTED)?;
-                        self.reply("409 Conflict", &body)?;
-                        return Ok(Action::None);
-                    }
+            };
+            let result = boot_server.upload(id, kind, data);
+            self.reply(
+                if result.is_ok() {
+                    "200 OK"
+                } else {
+                    "422 Unprocessable Content"
+                },
+                &serde_json::to_vec(&boot_server.status()).map_err(|_| Status::ABORTED)?,
+            )?;
+            return Ok(Action::None);
+        }
+        if let Route::BootJobStart { id } = selected_route {
+            match boot_server.prepare(id, head.header("x-serial-binding")) {
+                Ok(execution) => {
+                    self.reply("202 Accepted", br#"{"phase":"ready_to_handoff"}"#)?;
+                    return Ok(Action::Boot(alloc::boxed::Box::new(execution)));
+                }
+                Err(error) => {
+                    let body = serde_json::to_vec(&serde_json::json!({"error": error}))
+                        .map_err(|_| Status::ABORTED)?;
+                    self.reply("409 Conflict", &body)?;
+                    return Ok(Action::None);
                 }
             }
         }
