@@ -123,7 +123,7 @@ pub unsafe fn mmap(file: *mut DrmFile, offset: u64, length: u64) -> Result<MmapL
         // The destructor may already have decremented the refcount to zero
         // and be waiting to remove this node under the VMA write lock. Do not
         // resurrect that object while holding the read lock.
-        if !drm_kapi::memory::kref_get_unless_zero(&mut (*obj).refcount) {
+        if !drm_kapi::memory::kref_get_unless_zero(&(*obj).refcount) {
             read_unlock(ptr::addr_of_mut!((*vma_manager).vm_lock).cast::<AtomicU32>());
             return Err(NEG_EINVAL);
         }

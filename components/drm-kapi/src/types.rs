@@ -9,6 +9,7 @@
 use core::{
     ffi::{c_char, c_uint, c_ulong, c_void},
     mem::ManuallyDrop,
+    sync::atomic::{AtomicI32, AtomicI64},
 };
 
 // `struct mutex` (include/linux/mutex_types.h): opaque 24-byte x86_64 record.
@@ -98,16 +99,14 @@ pub struct DelayedWork {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy)]
 pub struct AtomicT {
-    pub counter: i32,
+    pub counter: AtomicI32,
 }
 
 /// `struct atomic64_t` (include/linux/atomic/atomic-long.h): one s64 counter.
 #[repr(C, align(8))]
-#[derive(Clone, Copy)]
 pub struct AtomicT64 {
-    pub counter: i64,
+    pub counter: AtomicI64,
 }
 const _: [(); 8] = [(); core::mem::size_of::<AtomicT64>()];
 

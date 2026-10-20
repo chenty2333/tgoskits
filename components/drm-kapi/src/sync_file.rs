@@ -11,7 +11,7 @@
 
 use alloc::{format, vec::Vec};
 use core::{
-    ffi::{CStr, c_char, c_int, c_long, c_uint, c_ulong, c_void},
+    ffi::{CStr, c_char, c_int, c_long, c_uint, c_void},
     mem::{offset_of, size_of},
     ptr,
     sync::atomic::{AtomicUsize, Ordering},
@@ -28,7 +28,7 @@ use crate::{
         DmaFenceUnwrap, dma_fence_unwrap_first, dma_fence_unwrap_merge, dma_fence_unwrap_next,
     },
     kernel_services::{anon_inode_getfile, fd_install, fget, get_unused_fd_flags, put_unused_fd},
-    list::{init_list_head, list_empty},
+    list::init_list_head,
     memory::{kfree, kzalloc_obj},
     mm_native::{copy_from_user, copy_to_user},
     shmem::{File, FileOperations, Inode, fput_file},
@@ -58,7 +58,7 @@ pub struct SyncFile {
     pub fence: *mut DmaFence,
     pub cb: DmaFenceCb,
     pub wq: WaitQueueHead,
-    pub flags: c_ulong,
+    pub flags: AtomicUsize,
 }
 
 /// File operations shared by every sync_file. Poll and ioctl are dispatched
@@ -213,7 +213,7 @@ unsafe extern "C" fn wake_pollers_on_signal(_fence: *mut DmaFence, cb: *mut DmaF
     let sync_file = unsafe { cb.cast::<u8>().sub(offset_of!(SyncFile, cb)) }.cast::<SyncFile>();
     // SAFETY: the SyncFile is live, and its wait queue is only touched here and
     // in the poll path.
-    unsafe { wake_up_all(&mut (*sync_file).wq) };
+    unsafe { wake_up_all(core::ptr::addr_of_mut!((*sync_file).wq)) };
 }
 
 /// Create a sync_file that holds a new reference to `fence`. Release it with
@@ -381,8 +381,8 @@ pub unsafe fn sync_file_release(file: *mut File) {
     // SAFETY: the last reference is being dropped, so nobody else can reach
     // the SyncFile while it is torn down.
     unsafe {
-        if (*sync_file).flags & (1 << POLL_ENABLED) != 0 {
-            dma_fence_remove_callback((*sync_file).fence, &mut (*sync_file).cb);
+        if (*sync_file).flags.load(Ordering::Acquire) & (1 << POLL_ENABLED) != 0 {
+            dma_fence_remove_callback((*sync_file).fence, ptr::addr_of_mut!((*sync_file).cb));
         }
         dma_fence_put((*sync_file).fence);
         kfree(sync_file);
@@ -409,12 +409,12 @@ pub unsafe extern "C" fn sync_file_poll(file: *mut File, pt: *mut PollTable) -> 
     let sync_file = unsafe { sync_file_of(file) };
     // SAFETY: the wait queue lives inside the live SyncFile.
     unsafe { poll_wait(file.cast(), ptr::addr_of_mut!((*sync_file).wq), pt) };
-    // SAFETY: the list head lives inside the live SyncFile.
-    if unsafe { list_empty(&(*sync_file).cb.node) } {
+    // The atomic flag alone elects the callback registrar. Reading cb.node
+    // here would race the fence callback-list mutation under its own lock.
+    {
         let bit: usize = 1 << POLL_ENABLED;
-        // SAFETY: `flags` is a `c_ulong`, which has the layout of `usize` on
-        // this 64-bit target, so the atomic view is valid.
-        let flags = unsafe { AtomicUsize::from_ptr(ptr::addr_of_mut!((*sync_file).flags).cast()) };
+        // SAFETY: The file reference retains this real atomic registration flag.
+        let flags = unsafe { &(*sync_file).flags };
         // Only the first poller arms the callback.
         if flags.fetch_or(bit, Ordering::AcqRel) & bit == 0 {
             // SAFETY: the fence is live, and `cb` is registered once and owned
@@ -429,7 +429,7 @@ pub unsafe extern "C" fn sync_file_poll(file: *mut File, pt: *mut PollTable) -> 
             // A negative result means the fence already signaled, so wake now.
             if armed < 0 {
                 // SAFETY: the wait queue lives inside the live SyncFile.
-                unsafe { wake_up_all(&mut (*sync_file).wq) };
+                unsafe { wake_up_all(core::ptr::addr_of_mut!((*sync_file).wq)) };
             }
         }
     }

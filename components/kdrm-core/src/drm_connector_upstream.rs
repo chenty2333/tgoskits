@@ -1265,7 +1265,7 @@ unsafe fn __drm_connector_put_safe(conn: *mut DrmConnector) {
     unsafe {
         let config = core::ptr::addr_of_mut!((*(*conn).dev).mode_config);
 
-        if !drm_kapi::memory::refcount_dec_and_test(&mut (*conn).base.refcount.refcount) {
+        if !drm_kapi::memory::refcount_dec_and_test(&(*conn).base.refcount.refcount) {
             return;
         }
         drm_kapi::list::llist_add(
@@ -1309,7 +1309,7 @@ pub unsafe extern "C" fn drm_connector_list_iter_next(
             }
             lhead = (*lhead).next;
             (*iter).conn = connector_from_head(lhead);
-            if drm_kapi::memory::kref_get_unless_zero(&mut (*(*iter).conn).base.refcount) {
+            if drm_kapi::memory::kref_get_unless_zero(&(*(*iter).conn).base.refcount) {
                 break;
             }
         }
@@ -3450,7 +3450,7 @@ pub unsafe extern "C" fn drm_mode_get_tile_group(
                 let tg = entry.cast::<DrmTileGroup>();
                 if core::slice::from_raw_parts((*tg).group_data.as_ptr(), 9)
                     == core::slice::from_raw_parts(topology_id, 9)
-                    && drm_kapi::memory::kref_get_unless_zero(&mut (*tg).refcount)
+                    && drm_kapi::memory::kref_get_unless_zero(&(*tg).refcount)
                 {
                     found_tg = tg;
                 }

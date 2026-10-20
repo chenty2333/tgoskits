@@ -1470,7 +1470,7 @@ pub unsafe extern "C" fn drm_crtc_vblank_off(crtc: *mut DrmCrtc) {
             drm_vblank_disable_and_save(dev, pipe);
         }
 
-        drm_kapi::wait::wake_up(&mut (*vblank).queue);
+        drm_kapi::wait::wake_up(core::ptr::addr_of_mut!((*vblank).queue));
 
         // Prevent subsequent drm_vblank_get() from re-enabling the vblank interrupt
         // by bumping the refcount.
@@ -2052,7 +2052,7 @@ pub unsafe extern "C" fn drm_handle_vblank(dev: *mut DrmDevice, pipe: u32) -> bo
         drm_update_vblank_count(dev, pipe, true);
         spin_unlock_raw(core::ptr::addr_of_mut!((*dev).vblank_time_lock));
 
-        drm_kapi::wait::wake_up(&mut (*vblank).queue);
+        drm_kapi::wait::wake_up(core::ptr::addr_of_mut!((*vblank).queue));
 
         // With instant-off, we defer disabling the interrupt until after we finish
         // processing the following vblank after all events have been signaled. The
@@ -2740,13 +2740,23 @@ mod tests {
         unsafe {
             let v = fx.vblank(0);
             assert_eq!(drm_vblank_get(dev, 0), 0);
-            assert_eq!((*v).refcount.counter, 1);
+            assert_eq!(
+                (*v).refcount
+                    .counter
+                    .load(core::sync::atomic::Ordering::Relaxed),
+                1
+            );
             assert!((*v).enabled);
             assert_eq!(fx.hw.enable_calls.load(Ordering::SeqCst), 1);
 
             // The second reference does not re-enable the interrupt.
             assert_eq!(drm_vblank_get(dev, 0), 0);
-            assert_eq!((*v).refcount.counter, 2);
+            assert_eq!(
+                (*v).refcount
+                    .counter
+                    .load(core::sync::atomic::Ordering::Relaxed),
+                2
+            );
             assert_eq!(fx.hw.enable_calls.load(Ordering::SeqCst), 1);
 
             drm_vblank_put(dev, 0);
@@ -2755,7 +2765,12 @@ mod tests {
 
             // The last put with offdelay < 0 disables at once.
             drm_vblank_put(dev, 0);
-            assert_eq!((*v).refcount.counter, 0);
+            assert_eq!(
+                (*v).refcount
+                    .counter
+                    .load(core::sync::atomic::Ordering::Relaxed),
+                0
+            );
             assert_eq!(fx.hw.disable_calls.load(Ordering::SeqCst), 1);
             assert!(!(*v).enabled);
 
@@ -2788,7 +2803,13 @@ mod tests {
             // Without an enable hook the CRTC cannot provide vblanks.
             (*(*fx.crtc(0)).funcs).enable_vblank = None;
             assert_eq!(drm_vblank_get(dev, 0), -EINVAL);
-            assert_eq!((*fx.vblank(0)).refcount.counter, 0);
+            assert_eq!(
+                (*fx.vblank(0))
+                    .refcount
+                    .counter
+                    .load(core::sync::atomic::Ordering::Relaxed),
+                0
+            );
         }
     }
 
@@ -2800,7 +2821,7 @@ mod tests {
         unsafe {
             let v = fx.vblank(0);
             (*v).enabled = true;
-            (*v).refcount.counter = 3;
+            (*v).refcount.counter.store(3, Ordering::SeqCst);
             (*v).max_vblank_count = u32::MAX; // trust the hardware counter
             fx.hw.counter.store(4, Ordering::SeqCst);
 
@@ -2917,7 +2938,12 @@ mod tests {
             // A future target remains on the vblank list and owns one ref.
             assert_eq!(drm_vblank_work_schedule(&mut work, 5, false), 1);
             assert!(!list_empty(&(*v).pending_work));
-            assert_eq!((*v).refcount.counter, 1);
+            assert_eq!(
+                (*v).refcount
+                    .counter
+                    .load(core::sync::atomic::Ordering::Relaxed),
+                1
+            );
 
             // Cancel the pending item under the event lock, as the source
             // helper's caller contract requires. The worker adapter itself is
@@ -2927,7 +2953,12 @@ mod tests {
             spin_unlock_raw(core::ptr::addr_of_mut!((*dev).event_lock));
             assert!(list_empty(&(*v).pending_work));
             assert!(list_empty(&work.node));
-            assert_eq!((*v).refcount.counter, 0);
+            assert_eq!(
+                (*v).refcount
+                    .counter
+                    .load(core::sync::atomic::Ordering::Relaxed),
+                0
+            );
         }
     }
 

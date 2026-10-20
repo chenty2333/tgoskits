@@ -295,56 +295,79 @@ pub fn init_waitqueue_head(head: &mut WaitQueueHead) {
     unsafe { init_list_head(core::ptr::addr_of_mut!(head.head)) };
 }
 
-pub fn add_wait_queue(head: &mut WaitQueueHead, entry: &mut WaitQueueEntry) {
-    let mut flags = 0u64;
-    spin_lock_irqsave(&mut head.lock, &mut flags);
-    // SAFETY: head.lock is held, protecting concurrent list mutation, and both entry.entry and head.head are valid references.
+/// Register a stable entry without exclusively borrowing a shared queue.
+///
+/// # Safety
+/// Both pointers must be initialized and live. `entry` must be unlinked and
+/// remain allocated until removal; its callback and private data stay valid.
+pub unsafe fn add_wait_queue(head: *mut WaitQueueHead, entry: *mut WaitQueueEntry) {
+    let mut flags = 0;
+    // SAFETY: The caller retains both objects; the queue lock serializes links.
     unsafe {
+        crate::locks::spin_lock_irqsave_raw(core::ptr::addr_of_mut!((*head).lock), &mut flags);
         list_add_tail(
-            core::ptr::addr_of_mut!(entry.entry),
-            core::ptr::addr_of_mut!(head.head),
-        )
-    };
-    spin_unlock_irqrestore(&mut head.lock, flags);
-}
-
-pub fn remove_wait_queue(head: &mut WaitQueueHead, entry: &mut WaitQueueEntry) {
-    let mut flags = 0u64;
-    spin_lock_irqsave(&mut head.lock, &mut flags);
-    // SAFETY: head.lock is held, serializing list removal, and entry.entry is a valid reference.
-    unsafe { list_del_init(core::ptr::addr_of_mut!(entry.entry)) };
-    spin_unlock_irqrestore(&mut head.lock, flags);
-}
-
-pub fn wake_up(head: &mut WaitQueueHead) {
-    wake_up_all(head);
-}
-
-pub fn wake_up_all(head: &mut WaitQueueHead) {
-    wake_up_key(head, core::ptr::null_mut());
-}
-
-fn wake_up_key(head: &mut WaitQueueHead, key: *mut c_void) {
-    let mut flags = 0u64;
-    spin_lock_irqsave(&mut head.lock, &mut flags);
-    // SAFETY: head.lock is held, preventing concurrent modification; head.head.next is an initialized list pointer.
-    let mut node = unsafe { core::ptr::read_volatile(core::ptr::addr_of!(head.head.next)) };
-    let sentinel = core::ptr::addr_of_mut!(head.head);
-    while !core::ptr::eq(node, sentinel) {
-        let entry = node
-            .cast::<u8>()
-            .wrapping_sub(offset_of!(WaitQueueEntry, entry))
-            .cast::<WaitQueueEntry>();
-        // SAFETY: node is non-null and not the sentinel, pointing to an active list node protected by head.lock.
-        let next = unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*node).next)) };
-        // SAFETY: entry is calculated from container_of (offset_of) on a valid node and points to an aligned WaitQueueEntry.
-        if let Some(wake) = unsafe { (*entry).func } {
-            // SAFETY: wake is a valid function pointer called with entry while head.lock is held.
-            unsafe { wake(entry, u32::MAX, 0, key) };
-        }
-        node = next;
+            core::ptr::addr_of_mut!((*entry).entry),
+            core::ptr::addr_of_mut!((*head).head),
+        );
+        crate::locks::spin_unlock_irqrestore_raw(core::ptr::addr_of_mut!((*head).lock), flags);
     }
-    spin_unlock_irqrestore(&mut head.lock, flags);
+}
+
+/// Remove a registered entry and synchronize with its wake callbacks.
+///
+/// # Safety
+/// Both pointers must remain live, and `entry` must belong to this queue.
+pub unsafe fn remove_wait_queue(head: *mut WaitQueueHead, entry: *mut WaitQueueEntry) {
+    let mut flags = 0;
+    // SAFETY: The queue lock serializes removal with traversal and callbacks.
+    unsafe {
+        crate::locks::spin_lock_irqsave_raw(core::ptr::addr_of_mut!((*head).lock), &mut flags);
+        list_del_init(core::ptr::addr_of_mut!((*entry).entry));
+        crate::locks::spin_unlock_irqrestore_raw(core::ptr::addr_of_mut!((*head).lock), flags);
+    }
+}
+
+/// Wake the entries currently registered on a shared queue.
+///
+/// # Safety
+/// `head` must remain live and initialized; callbacks must obey the queue contract.
+pub unsafe fn wake_up(head: *mut WaitQueueHead) {
+    // SAFETY: Forward the caller's live-queue contract.
+    unsafe { wake_up_all(head) };
+}
+
+/// Wake all entries without imposing an exclusive Rust borrow on the queue.
+///
+/// # Safety
+/// `head` must remain live and initialized; callbacks must obey the queue contract.
+pub unsafe fn wake_up_all(head: *mut WaitQueueHead) {
+    // SAFETY: Forward the caller's live-queue contract.
+    unsafe { wake_up_key(head, core::ptr::null_mut()) };
+}
+
+/// # Safety
+/// `head` is a live queue; its callbacks cannot reacquire this queue's lock.
+unsafe fn wake_up_key(head: *mut WaitQueueHead, key: *mut c_void) {
+    let mut flags = 0;
+    // SAFETY: The queue lock pins every linked entry and serializes callback
+    // traversal with registration/removal. No whole-queue reference is formed.
+    unsafe {
+        crate::locks::spin_lock_irqsave_raw(core::ptr::addr_of_mut!((*head).lock), &mut flags);
+        let mut node = (*head).head.next;
+        let sentinel = core::ptr::addr_of_mut!((*head).head);
+        while !core::ptr::eq(node, sentinel) {
+            let entry = node
+                .cast::<u8>()
+                .sub(offset_of!(WaitQueueEntry, entry))
+                .cast::<WaitQueueEntry>();
+            let next = (*node).next;
+            if let Some(wake) = (*entry).func {
+                wake(entry, u32::MAX, 0, key);
+            }
+            node = next;
+        }
+        crate::locks::spin_unlock_irqrestore_raw(core::ptr::addr_of_mut!((*head).lock), flags);
+    }
 }
 
 /// Linux-compatible default wait-queue wake callback.
@@ -703,10 +726,14 @@ pub unsafe fn poll_wait(
 }
 
 /// Linux `wake_up_interruptible_poll()`.
+///
+/// # Safety
+/// `head` must remain live and initialized through all registered callbacks.
 #[inline]
-pub fn wake_up_interruptible_poll(head: &mut WaitQueueHead, key: u32) {
+pub unsafe fn wake_up_interruptible_poll(head: *mut WaitQueueHead, key: u32) {
     // Linux encodes the event mask in the pointer value; it is never dereferenced.
-    wake_up_key(head, key as usize as *mut c_void);
+    // SAFETY: Forward the caller's live-queue contract; the key is never dereferenced.
+    unsafe { wake_up_key(head, key as usize as *mut c_void) };
 }
 
 /// Linux `wait_event_interruptible_locked()` macro.
@@ -926,7 +953,7 @@ pub extern "C" fn __var_waitqueue(addr: *mut c_void) -> *mut WaitQueueHead {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn wake_up_var(addr: *mut c_void) {
     // SAFETY: __var_waitqueue returns an initialized WaitQueueHead pointer for addr.
-    unsafe { wake_up_all(&mut *__var_waitqueue(addr)) };
+    unsafe { wake_up_all(__var_waitqueue(addr)) };
 }
 
 // upstream: kernel/sched/wait.c init_wait_entry()
@@ -1124,9 +1151,18 @@ mod tests {
         init_waitqueue_head(&mut head);
         entry.func = Some(capture);
         entry.private = core::ptr::addr_of_mut!(seen).cast();
-        add_wait_queue(&mut head, &mut entry);
-        wake_up_interruptible_poll(&mut head, 0x18); // EPOLLERR | EPOLLHUP
-        remove_wait_queue(&mut head, &mut entry);
+        // SAFETY: Both stack objects remain live and the entry is removed before return.
+        unsafe {
+            add_wait_queue(
+                core::ptr::addr_of_mut!(head),
+                core::ptr::addr_of_mut!(entry),
+            );
+            wake_up_interruptible_poll(core::ptr::addr_of_mut!(head), 0x18);
+            remove_wait_queue(
+                core::ptr::addr_of_mut!(head),
+                core::ptr::addr_of_mut!(entry),
+            );
+        }
         assert_eq!(seen, 0x18);
     }
 

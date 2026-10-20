@@ -12,7 +12,7 @@ use drm_kapi::{
     config::{EINVAL, ENOMEM, EOPNOTSUPP, GFP_KERNEL},
     dma_resv::{dma_resv_fini, dma_resv_init},
     list::{init_list_head, list_add_tail, list_del_init, list_empty},
-    locks::{spin_lock, spin_unlock},
+    locks::{spin_lock_raw, spin_unlock_raw},
     memory::{kfree, kmalloc, kref_init, kref_put},
     mutex::{mutex_init, mutex_lock, mutex_unlock},
     types::{Kref, WwAcquireCtx},
@@ -314,23 +314,23 @@ pub unsafe extern "C" fn drm_gem_handle_delete(filp: *mut DrmFile, handle: u32) 
     }
     // SAFETY: `filp` is checked non-null; remove handle from IDR under `table_lock`.
     unsafe {
-        spin_lock(&mut (*filp).table_lock);
+        spin_lock_raw(core::ptr::addr_of_mut!((*filp).table_lock));
         let obj = idr_replace(
             core::ptr::addr_of_mut!((*filp).object_idr),
             core::ptr::null_mut(),
             handle as i32,
         )
         .cast::<DrmGemObject>();
-        spin_unlock(&mut (*filp).table_lock);
+        spin_unlock_raw(core::ptr::addr_of_mut!((*filp).table_lock));
         if obj.is_null() {
             return -EINVAL;
         }
 
         drm_gem_object_release_handle(handle as i32, obj.cast(), filp.cast());
 
-        spin_lock(&mut (*filp).table_lock);
+        spin_lock_raw(core::ptr::addr_of_mut!((*filp).table_lock));
         idr_remove(core::ptr::addr_of_mut!((*filp).object_idr), handle as i32);
-        spin_unlock(&mut (*filp).table_lock);
+        spin_unlock_raw(core::ptr::addr_of_mut!((*filp).table_lock));
 
         0
     }
@@ -387,14 +387,14 @@ pub unsafe extern "C" fn drm_gem_handle_create_tail(
         // Retain the object before reserving an ID, so every error path can
         // unwind the handle reference consistently.
         drm_gem_object_handle_get(obj);
-        spin_lock(&mut (*file_priv).table_lock);
+        spin_lock_raw(core::ptr::addr_of_mut!((*file_priv).table_lock));
         let ret = idr_alloc(
             core::ptr::addr_of_mut!((*file_priv).object_idr),
             core::ptr::null_mut(),
             1,
             0,
         );
-        spin_unlock(&mut (*file_priv).table_lock);
+        spin_unlock_raw(core::ptr::addr_of_mut!((*file_priv).table_lock));
 
         mutex_unlock(core::ptr::addr_of_mut!((*(*obj).dev).object_name_lock));
 
@@ -409,12 +409,12 @@ pub unsafe extern "C" fn drm_gem_handle_create_tail(
         // Grant that permission before publishing the handle to the caller.
         let allow_ret = drm_vma_node_allow(core::ptr::addr_of_mut!((*obj).vma_node), file_priv);
         if allow_ret != 0 {
-            spin_lock(&mut (*file_priv).table_lock);
+            spin_lock_raw(core::ptr::addr_of_mut!((*file_priv).table_lock));
             idr_remove(
                 core::ptr::addr_of_mut!((*file_priv).object_idr),
                 handle as i32,
             );
-            spin_unlock(&mut (*file_priv).table_lock);
+            spin_unlock_raw(core::ptr::addr_of_mut!((*file_priv).table_lock));
             drm_gem_object_handle_put_unlocked(obj);
             return allow_ret;
         }
@@ -425,12 +425,12 @@ pub unsafe extern "C" fn drm_gem_handle_create_tail(
             let open_ret = open(obj, file_priv);
             if open_ret != 0 {
                 drm_vma_node_revoke(core::ptr::addr_of_mut!((*obj).vma_node), file_priv);
-                spin_lock(&mut (*file_priv).table_lock);
+                spin_lock_raw(core::ptr::addr_of_mut!((*file_priv).table_lock));
                 idr_remove(
                     core::ptr::addr_of_mut!((*file_priv).object_idr),
                     handle as i32,
                 );
-                spin_unlock(&mut (*file_priv).table_lock);
+                spin_unlock_raw(core::ptr::addr_of_mut!((*file_priv).table_lock));
                 drm_gem_object_handle_put_unlocked(obj);
                 return open_ret;
             }
@@ -438,13 +438,13 @@ pub unsafe extern "C" fn drm_gem_handle_create_tail(
 
         // Keep the reserved ID invisible to lookup until VMA permission and
         // the driver's per-file open hook are both fully established.
-        spin_lock(&mut (*file_priv).table_lock);
+        spin_lock_raw(core::ptr::addr_of_mut!((*file_priv).table_lock));
         let replaced = idr_replace(
             core::ptr::addr_of_mut!((*file_priv).object_idr),
             obj.cast(),
             handle as i32,
         );
-        spin_unlock(&mut (*file_priv).table_lock);
+        spin_unlock_raw(core::ptr::addr_of_mut!((*file_priv).table_lock));
         debug_assert!(
             replaced.is_null(),
             "reserved GEM handle was unexpectedly occupied"
@@ -603,7 +603,7 @@ unsafe fn objects_lookup(
     objs: *mut *mut DrmGemObject,
 ) -> i32 {
     // SAFETY: `filp` is live per this function's `# Safety`; `table_lock` guards `object_idr`, and it stays held until the lookup loop finishes.
-    unsafe { spin_lock(&mut (*filp).table_lock) };
+    unsafe { spin_lock_raw(core::ptr::addr_of_mut!((*filp).table_lock)) };
     for i in 0..count as usize {
         // SAFETY: `handles` holds `count` entries per this function's `# Safety`, and the loop index `i` is below `count`, so `add(i)` is in bounds.
         let handle = unsafe { *handles.add(i) };
@@ -617,7 +617,7 @@ unsafe fn objects_lookup(
         };
         if obj.is_null() {
             // SAFETY: Drops the `table_lock` acquired at the top of this function before returning the error path.
-            unsafe { spin_unlock(&mut (*filp).table_lock) };
+            unsafe { spin_unlock_raw(core::ptr::addr_of_mut!((*filp).table_lock)) };
             for j in 0..i {
                 // SAFETY: Entries `0..i` were filled by earlier iterations, each holding a reference taken by `drm_gem_object_get`, so each one is released here.
                 unsafe { drm_gem_object_put(*objs.add(j)) };
@@ -632,7 +632,7 @@ unsafe fn objects_lookup(
         }
     }
     // SAFETY: Releases the `table_lock` taken at the top of this function, after every handle has been looked up and referenced.
-    unsafe { spin_unlock(&mut (*filp).table_lock) };
+    unsafe { spin_unlock_raw(core::ptr::addr_of_mut!((*filp).table_lock)) };
     0
 }
 
@@ -698,7 +698,7 @@ pub unsafe extern "C" fn drm_gem_object_lookup(
     }
     // SAFETY: `filp` is checked non-null; acquire `table_lock` and look up object in IDR.
     unsafe {
-        spin_lock(&mut (*filp).table_lock);
+        spin_lock_raw(core::ptr::addr_of_mut!((*filp).table_lock));
         let obj = idr_find(
             core::ptr::addr_of_mut!((*filp).object_idr),
             handle as c_ulong,
@@ -707,7 +707,7 @@ pub unsafe extern "C" fn drm_gem_object_lookup(
         if !obj.is_null() {
             drm_gem_object_get(obj);
         }
-        spin_unlock(&mut (*filp).table_lock);
+        spin_unlock_raw(core::ptr::addr_of_mut!((*filp).table_lock));
         obj
     }
 }

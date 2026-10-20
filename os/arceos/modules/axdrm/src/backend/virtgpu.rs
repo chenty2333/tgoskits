@@ -220,7 +220,7 @@ pub(crate) unsafe extern "C" fn gem_open(obj: *mut DrmGemObject, file: *mut DrmF
         return NEG_EINVAL;
     }
     // SAFETY: The caller retains the live file, initialized by `open`.
-    let Ok(private) = file_private(unsafe { &*file }) else {
+    let Ok(private) = (unsafe { file_private(file) }) else {
         return NEG_EINVAL;
     };
     let node = kmalloc(size_of::<AttachedResource>(), GFP_KERNEL).cast::<AttachedResource>();
@@ -328,7 +328,7 @@ pub(crate) unsafe extern "C" fn gem_close(obj: *mut DrmGemObject, file: *mut Drm
         return;
     }
     // SAFETY: The caller retains the initialized file throughout this callback.
-    let Ok(private) = file_private(unsafe { &*file }) else {
+    let Ok(private) = (unsafe { file_private(file) }) else {
         return;
     };
     // SAFETY: Both the file state and object remain live through this hook.
@@ -383,6 +383,8 @@ pub(crate) unsafe extern "C" fn gem_close(obj: *mut DrmGemObject, file: *mut Drm
         })
         .and_then(|result| result)
     };
+    // Publish progress pumped by cleanup, after releasing the GPU lock.
+    fence::on_gpu_completion();
     match retired {
         Ok(node) if !node.is_null() => {
             // SAFETY: The removed node owns one GEM reference. Drop outside
@@ -401,10 +403,18 @@ pub(crate) unsafe extern "C" fn gem_close(obj: *mut DrmGemObject, file: *mut Drm
     }
 }
 
-fn file_private(file: &DrmFile) -> Result<&FilePrivate, i32> {
-    let private = file.driver_priv.cast::<FilePrivate>();
-    // SAFETY: kdrm-core invokes driver ioctls only after `open` has installed
-    // this private allocation and serializes final access with `postclose`.
+/// # Safety
+/// `file` remains live throughout the returned borrow; its driver-private
+/// pointer is immutable between open and final postclose. Other core fields
+/// may change concurrently, so do not borrow the whole `DrmFile`.
+unsafe fn file_private<'a>(file: *const DrmFile) -> Result<&'a FilePrivate, i32> {
+    if file.is_null() {
+        return Err(NEG_EINVAL);
+    }
+    // SAFETY: The caller retains the file through every private-state access.
+    let private = unsafe { (*file).driver_priv.cast::<FilePrivate>() };
+    // SAFETY: Open installed this allocation before publishing the file;
+    // postclose cannot run while the caller retains the file.
     unsafe { private.as_ref() }.ok_or(NEG_EINVAL)
 }
 
@@ -431,8 +441,7 @@ fn capabilities() -> Result<GpuCapabilities, i32> {
 
 fn context(file: *mut DrmFile) -> Result<Option<ContextHandle>, i32> {
     // SAFETY: If non-null, `file` points to an active `DrmFile` structure provided by DRM core.
-    let file = unsafe { file.as_ref() }.ok_or(NEG_EINVAL)?;
-    let context = file_private(file)?.state.lock().context;
+    let context = unsafe { file_private(file) }?.state.lock().context;
     Ok(context)
 }
 
@@ -487,8 +496,7 @@ fn create_context(
     explicit: bool,
 ) -> Result<ContextHandle, i32> {
     // SAFETY: If non-null, `file` points to an active `DrmFile` structure provided by DRM core.
-    let file_ref = unsafe { file.as_ref() }.ok_or(NEG_EINVAL)?;
-    let private = file_private(file_ref)?;
+    let private = unsafe { file_private(file) }?;
     if !capabilities()?.supports_3d {
         return Err(NEG_EOPNOTSUPP);
     }
@@ -543,8 +551,7 @@ fn attach_resource(
     object: *mut DrmGemObject,
 ) -> Result<(), i32> {
     // SAFETY: The ioctl owns the live file and an independent GEM lookup ref.
-    let file_ref = unsafe { file.as_ref() }.ok_or(NEG_EINVAL)?;
-    let private = file_private(file_ref)?;
+    let private = unsafe { file_private(file) }?;
     with_virgl(|virgl| {
         let node = {
             let state = private.state.lock();
@@ -589,6 +596,8 @@ fn destroy_context_before_drop(context: ContextHandle) {
             virgl.ctrl_notify();
             result
         });
+        // Cleanup may drain completions without leaving another device IRQ.
+        fence::on_gpu_completion();
         match result {
             Ok(Ok(())) => return,
             Ok(Err(GpuError::Busy)) => {
@@ -1409,7 +1418,7 @@ unsafe extern "C" fn ioctl_execbuffer(
     };
     let (capset_id, num_rings) = {
         // SAFETY: The ioctl retains the live file and private allocation.
-        let private = match file_private(unsafe { &*file }) {
+        let private = match unsafe { file_private(file) } {
             Ok(private) => private,
             Err(error) => return error,
         };

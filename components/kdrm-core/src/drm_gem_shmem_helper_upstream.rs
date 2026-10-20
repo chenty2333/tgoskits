@@ -377,7 +377,7 @@ unsafe extern "C" fn handle_vm_open(area: *mut VmAreaStruct) {
             warn_on(true);
             return;
         }
-        let bumped = refcount_inc_not_zero(&mut (*shmem).pages_use_count);
+        let bumped = refcount_inc_not_zero(&(*shmem).pages_use_count);
         warn_on(!bumped);
         release_reservation_lock((*gem).resv);
         crate::drm_gem_upstream::drm_gem_object_get(gem);
@@ -565,7 +565,7 @@ unsafe fn acquire_pages_locked(shmem: *mut DrmGemShmemObject) -> i32 {
     // map attributes if requested, and stores the array in `shmem.pages` with `pages_use_count = 1`.
     unsafe {
         let gem = ptr::addr_of_mut!((*shmem).base);
-        if refcount_inc_not_zero(&mut (*shmem).pages_use_count) {
+        if refcount_inc_not_zero(&(*shmem).pages_use_count) {
             return 0;
         }
         if object_is_imported(gem) {
@@ -628,7 +628,7 @@ unsafe fn acquire_pages_locked(shmem: *mut DrmGemShmemObject) -> i32 {
         }
 
         (*shmem).pages = page_table;
-        refcount_set(&mut (*shmem).pages_use_count, 1);
+        refcount_set(&(*shmem).pages_use_count, 1);
         0
     }
 }
@@ -643,7 +643,7 @@ pub unsafe extern "C" fn drm_gem_shmem_put_pages_locked(shmem: *mut DrmGemShmemO
     // write-combine caching attributes, flushes dirty/accessed flags to folios, releases all
     // page references via `put_page`, frees the `pages` array, and clears `shmem.pages`.
     unsafe {
-        if !refcount_dec_and_test(&mut (*shmem).pages_use_count) {
+        if !refcount_dec_and_test(&(*shmem).pages_use_count) {
             return;
         }
         let count = total_pages(shmem);
@@ -658,7 +658,7 @@ pub unsafe extern "C" fn drm_gem_shmem_put_pages_locked(shmem: *mut DrmGemShmemO
                 drm_kapi::page_cache::set_pages_array_wb_kernel(table, c)
             });
             if status != 0 {
-                refcount_set(&mut (*shmem).pages_use_count, 1);
+                refcount_set(&(*shmem).pages_use_count, 1);
                 warn_on(true);
                 return;
             }
@@ -698,12 +698,12 @@ pub unsafe extern "C" fn drm_gem_shmem_pin_locked(shmem: *mut DrmGemShmemObject)
     // Otherwise, calls `acquire_pages_locked` to allocate backing pages and sets `pages_pin_count = 1`.
     unsafe {
         warn_on(object_is_imported(ptr::addr_of!((*shmem).base)));
-        if refcount_inc_not_zero(&mut (*shmem).pages_pin_count) {
+        if refcount_inc_not_zero(&(*shmem).pages_pin_count) {
             return 0;
         }
         let status = acquire_pages_locked(shmem);
         if status == 0 {
-            refcount_set(&mut (*shmem).pages_pin_count, 1);
+            refcount_set(&(*shmem).pages_pin_count, 1);
         }
         status
     }
@@ -717,7 +717,7 @@ pub unsafe extern "C" fn drm_gem_shmem_unpin_locked(shmem: *mut DrmGemShmemObjec
     // SAFETY: Called under `shmem.base.resv`. Decrements `pages_pin_count`; when it reaches 0,
     // releases backing pages via `drm_gem_shmem_put_pages_locked`.
     unsafe {
-        if refcount_dec_and_test(&mut (*shmem).pages_pin_count) {
+        if refcount_dec_and_test(&(*shmem).pages_pin_count) {
             drm_gem_shmem_put_pages_locked(shmem);
         }
     }
@@ -733,7 +733,7 @@ pub unsafe extern "C" fn drm_gem_shmem_pin(shmem: *mut DrmGemShmemObject) -> i32
     unsafe {
         let gem = ptr::addr_of_mut!((*shmem).base);
         warn_on(object_is_imported(gem));
-        if refcount_inc_not_zero(&mut (*shmem).pages_pin_count) {
+        if refcount_inc_not_zero(&(*shmem).pages_pin_count) {
             return 0;
         }
         let lock_res = acquire_reservation_lock_interruptible((*gem).resv, ptr::null_mut());
@@ -794,7 +794,7 @@ pub unsafe extern "C" fn drm_gem_shmem_vmap_locked(
             return (*ops).vmap.unwrap()(buf, map.cast());
         }
 
-        if refcount_inc_not_zero(&mut (*shmem).vmap_use_count) {
+        if refcount_inc_not_zero(&(*shmem).vmap_use_count) {
             (*map).is_iomem = false;
             (*map)._anon_0 = IosysMapAnon0 {
                 vaddr: (*shmem).vaddr,
@@ -826,7 +826,7 @@ pub unsafe extern "C" fn drm_gem_shmem_vmap_locked(
         (*shmem).vaddr = mapped_addr;
         (*map).is_iomem = false;
         (*map)._anon_0 = IosysMapAnon0 { vaddr: mapped_addr };
-        refcount_set(&mut (*shmem).vmap_use_count, 1);
+        refcount_set(&(*shmem).vmap_use_count, 1);
         update_flags(
             shmem,
             get_flags(shmem)
@@ -860,7 +860,7 @@ pub unsafe extern "C" fn drm_gem_shmem_vunmap_locked(
             return;
         }
 
-        if refcount_dec_and_test(&mut (*shmem).vmap_use_count) {
+        if refcount_dec_and_test(&(*shmem).vmap_use_count) {
             vunmap((*shmem).vaddr);
             (*shmem).vaddr = ptr::null_mut();
             drm_gem_shmem_unpin_locked(shmem);

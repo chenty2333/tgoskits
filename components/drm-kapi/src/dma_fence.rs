@@ -105,7 +105,7 @@ unsafe fn test_flag(fence: *mut DmaFence, bit: u32) -> bool {
 ///
 /// # Safety
 /// `fence` must point to a live `DmaFence`.
-unsafe fn is_done_flag(fence: *mut DmaFence) -> bool {
+pub(crate) unsafe fn is_done_flag(fence: *mut DmaFence) -> bool {
     // SAFETY: forwarded to `test_flag` with the same liveness requirement.
     unsafe { test_flag(fence, DMA_FENCE_FLAG_SIGNALED_BIT) }
 }
@@ -196,7 +196,7 @@ pub unsafe extern "C" fn dma_fence_get(fence: *mut DmaFence) -> *mut DmaFence {
     }
     // SAFETY: the caller owns a reference, so the fence and its refcount are
     // live memory.
-    let took = refcount_inc_not_zero(unsafe { &mut (*fence).refcount.refcount });
+    let took = refcount_inc_not_zero(unsafe { &(*fence).refcount.refcount });
     assert!(took, "dma_fence_get requires an owned live fence reference");
     fence
 }
@@ -216,7 +216,7 @@ pub unsafe fn dma_fence_get_rcu(fence: *mut DmaFence) -> *mut DmaFence {
     }
     // SAFETY: the caller is inside an RCU read-side section, so the fence
     // memory stays allocated while its refcount is probed.
-    if unsafe { kref_get_unless_zero(&mut (*fence).refcount) } {
+    if unsafe { kref_get_unless_zero(&(*fence).refcount) } {
         fence
     } else {
         ptr::null_mut()

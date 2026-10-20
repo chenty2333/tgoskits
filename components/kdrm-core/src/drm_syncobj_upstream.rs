@@ -306,7 +306,7 @@ enum EventfdReady {
 
 struct SyncobjWaitQueueRegistration {
     head: *mut WaitQueueHead,
-    entry: WaitQueueEntry,
+    entry: UnsafeCell<WaitQueueEntry>,
     notifier: SyncobjWaitNotifier,
 }
 
@@ -336,24 +336,25 @@ impl SyncobjWaitQueueRegistrations {
             let head = object.wait.get();
             registrations.push(SyncobjWaitQueueRegistration {
                 head,
-                entry,
+                entry: UnsafeCell::new(entry),
                 notifier: SyncobjWaitNotifier {
                     woken: AtomicBool::new(false),
                     task,
                 },
             });
-            let registration = registrations
-                .last_mut()
-                .expect("a wait-queue registration was just inserted");
-            registration.entry.private = ptr::addr_of_mut!(registration.notifier).cast();
-            // SAFETY: `registration.entry` is stored in `registrations` whose capacity was reserved upfront.
-            // init_list_head initializes the embedded `ListHead` pointers to point to itself.
+        }
+        // Finish allocation and initialization before exposing any callback.
+        // Interior-mutability storage keeps shared notifier reads from freezing
+        // the linked entry while another task wakes this queue.
+        for registration in &registrations {
+            let entry = registration.entry.get();
+            // SAFETY: Stable Vec storage, retained objects and notifier; removal
+            // in Drop synchronizes with callbacks before any allocation dies.
             unsafe {
-                drm_kapi::list::init_list_head(ptr::addr_of_mut!(registration.entry.entry));
+                (*entry).private = ptr::addr_of!(registration.notifier).cast_mut().cast();
+                drm_kapi::list::init_list_head(ptr::addr_of_mut!((*entry).entry));
+                add_wait_queue(registration.head, entry);
             }
-            // SAFETY: `head` was obtained from `object.wait.get()`, which is an initialized `WaitQueueHead`
-            // outliving the wait registration. `registration.entry` has stable storage in the reserved Vec capacity.
-            add_wait_queue(unsafe { &mut *head }, &mut registration.entry);
         }
         Ok(Self(registrations))
     }
@@ -367,10 +368,10 @@ impl SyncobjWaitQueueRegistrations {
 
 impl Drop for SyncobjWaitQueueRegistrations {
     fn drop(&mut self) {
-        for registration in &mut self.0 {
+        for registration in &self.0 {
             // SAFETY: `registration.head` points to the `WaitQueueHead` where `registration.entry` was added.
             // remove_wait_queue unlinks the entry under the wait-queue spinlock before the entry is dropped.
-            remove_wait_queue(unsafe { &mut *registration.head }, &mut registration.entry);
+            unsafe { remove_wait_queue(registration.head, registration.entry.get()) };
         }
     }
 }
@@ -487,7 +488,7 @@ impl FenceCallbackRegistrations {
 
 impl Drop for FenceCallbackRegistrations {
     fn drop(&mut self) {
-        for registration in &mut self.0 {
+        for registration in &self.0 {
             // SAFETY: the local Arc keeps the callback record live while it is
             // removed. A false result means the callback owns its retained Arc.
             let callback = unsafe {
@@ -578,7 +579,7 @@ impl DrmSyncobj {
         };
         // SAFETY: `self.wait` is initialized in `new()` and lives for the entire lifetime of `self`.
         // wake_up_all acquires the wait-queue's internal spinlock.
-        wake_up_all(unsafe { &mut *self.wait.get() });
+        unsafe { wake_up_all(self.wait.get()) };
         drop(retired);
         self.notify_pending_eventfds();
     }
@@ -695,7 +696,7 @@ impl DrmSyncobj {
             state.fence.replace(FenceRef(base))
         };
         // SAFETY: `self.wait` is initialized and valid for the lifetime of `self`; wake_up_all acquires the internal spinlock.
-        wake_up_all(unsafe { &mut *self.wait.get() });
+        unsafe { wake_up_all(self.wait.get()) };
         drop(retired);
         self.notify_pending_eventfds();
         0
@@ -1379,7 +1380,7 @@ pub unsafe extern "C" fn drm_syncobj_find_fence(
                     drm_kapi::primitives::msecs_to_jiffies(WAIT_FOR_SUBMIT_TIMEOUT_JIFFIES);
                 let wait = drm_kapi::wait_event_interruptible_timeout!(
                     // SAFETY: `syncobj` is live and its wait field is an initialized WaitQueueHead.
-                    unsafe { &mut *(*syncobj).wait.get() },
+                    unsafe { (*syncobj).wait.get() },
                     // SAFETY: `syncobj` is live and holds an acquired strong reference.
                     unsafe { &*syncobj }.point_available(point),
                     timeout,
@@ -1416,7 +1417,8 @@ pub unsafe fn drm_syncobj_signal_fence(fence: *mut DmaFence, error: i32) {
     // SAFETY: zeroed MaybeUninit satisfies WaitQueueHead layout, initialized by init_waitqueue_head below.
     let mut wait = unsafe { MaybeUninit::<WaitQueueHead>::zeroed().assume_init() };
     init_waitqueue_head(&mut wait);
-    wake_up_all(&mut wait);
+    // SAFETY: The detached queue is exclusively owned until all callbacks finish.
+    unsafe { wake_up_all(ptr::addr_of_mut!(wait)) };
 }
 
 /// Install one completion fence in a binary payload, or append it at a

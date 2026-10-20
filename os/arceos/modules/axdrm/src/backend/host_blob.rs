@@ -152,6 +152,8 @@ pub(super) fn unmap_before_release(resource: BufferHandle) {
             result
         })
         .and_then(core::convert::identity);
+        // Publish cleanup progress without making completion queries self-wake.
+        super::fence::on_gpu_completion();
         match result {
             Ok(()) | Err(GpuError::DeviceLost) => return,
             Err(error) => {

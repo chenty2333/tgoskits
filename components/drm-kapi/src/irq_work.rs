@@ -47,7 +47,11 @@ pub fn init_irq_work<W: IrqWorkPtr>(work: W, func: unsafe extern "C" fn(*mut Irq
     // The node is idle by contract, so no dispatcher is reading these fields.
     unsafe {
         (*slot).node.next = core::ptr::null_mut();
-        (*slot).node.flags.counter = 0;
+        (*slot)
+            .node
+            .flags
+            .counter
+            .store(0, core::sync::atomic::Ordering::Relaxed);
         (*slot).node.src = 0;
         (*slot).node.dst = 0;
         (*slot).func = Some(func);

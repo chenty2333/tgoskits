@@ -45,7 +45,10 @@ pub unsafe fn drm_handle_vblank_works(vblank: *mut DrmVblankCrtc) {
     // Detaching qualified works via `list_del_init`, dropping vblank refs via `drm_vblank_put`,
     // queuing works on `worker`, and waking `work_wait_queue` are all performed under lock protection.
     unsafe {
-        let count = (*vblank).count.counter as u64;
+        let count = (*vblank)
+            .count
+            .counter
+            .load(core::sync::atomic::Ordering::SeqCst) as u64;
         let mut wake = false;
 
         let dev = (*vblank).dev;
@@ -71,7 +74,7 @@ pub unsafe fn drm_handle_vblank_works(vblank: *mut DrmVblankCrtc) {
         }
 
         if wake {
-            wake_up_all(&mut (*vblank).work_wait_queue);
+            wake_up_all(core::ptr::addr_of_mut!((*vblank).work_wait_queue));
         }
     }
 }
@@ -106,7 +109,7 @@ pub unsafe fn drm_vblank_cancel_pending_works(vblank: *mut DrmVblankCrtc) {
             cur = next;
         }
 
-        wake_up_all(&mut (*vblank).work_wait_queue);
+        wake_up_all(core::ptr::addr_of_mut!((*vblank).work_wait_queue));
     }
 }
 
@@ -188,7 +191,7 @@ pub unsafe extern "C" fn drm_vblank_work_schedule(
         // out:
         spin_unlock_irqrestore_raw(core::ptr::addr_of_mut!((*dev).event_lock), irqflags);
         if wake {
-            wake_up_all(&mut (*vblank).work_wait_queue);
+            wake_up_all(core::ptr::addr_of_mut!((*vblank).work_wait_queue));
         }
         ret
     }
@@ -221,7 +224,7 @@ pub unsafe extern "C" fn drm_vblank_work_cancel_sync(work: *mut DrmVblankWork) -
         (*work).cancelling += 1;
         spin_unlock_irq_raw(core::ptr::addr_of_mut!((*dev).event_lock));
 
-        wake_up_all(&mut (*vblank).work_wait_queue);
+        wake_up_all(core::ptr::addr_of_mut!((*vblank).work_wait_queue));
 
         if cancel_work_sync(core::ptr::addr_of_mut!((*work).base)) {
             ret = true;

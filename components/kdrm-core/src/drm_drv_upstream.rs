@@ -282,7 +282,10 @@ pub unsafe extern "C" fn drm_dev_unplug(dev: *mut DrmDevice) {
                 .cast::<u8>()
                 .sub(core::mem::offset_of!(DrmFile, lhead))
                 .cast::<DrmFile>();
-            wake_up_interruptible_poll(&mut (*file).event_wait, EPOLLERR | EPOLLHUP);
+            wake_up_interruptible_poll(
+                core::ptr::addr_of_mut!((*file).event_wait),
+                EPOLLERR | EPOLLHUP,
+            );
             cur = (*cur).next;
         }
         mutex_unlock(core::ptr::addr_of_mut!((*dev).filelist_mutex));

@@ -15,6 +15,7 @@ use alloc::{
     vec::Vec,
 };
 use core::{
+    cell::UnsafeCell,
     ffi::{c_char, c_int, c_long, c_void},
     mem, ptr,
     sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering},
@@ -352,7 +353,7 @@ struct KapiFile {
 
 struct WaitEntryOwner {
     head: usize,
-    entry: Box<WaitQueueEntry>,
+    entry: Box<UnsafeCell<WaitQueueEntry>>,
 }
 
 // SAFETY: Linux file fields are internally synchronized by LinuxKPI, while
@@ -401,10 +402,10 @@ impl Drop for KapiFile {
         }
         KAPI_FILES.lock().remove(&(raw as usize));
         let entries = mem::take(&mut *self.wait_entries.lock());
-        for mut entry in entries {
+        for entry in entries {
             // Detach before fput can run the owning file_operations release.
             // SAFETY: `entry.head` is a valid pointer to WaitQueueHead registered previously.
-            unsafe { remove_wait_queue(&mut *entry.head_as_ptr(), &mut entry.entry) };
+            unsafe { remove_wait_queue(entry.head_as_ptr(), entry.entry.get()) };
         }
         // SAFETY: Ownership of `raw` is transferred to `fput_file` to release the LinuxKPI file reference.
         unsafe { shmem::fput_file(raw) };
@@ -659,19 +660,21 @@ unsafe extern "C" fn register_poll_wait(
         return;
     }
     // SAFETY: Zeroed memory creates an initial unlinked WaitQueueEntry.
-    let Ok(mut entry) = Box::try_new(unsafe { mem::zeroed::<WaitQueueEntry>() }) else {
+    let Ok(entry) = Box::try_new(UnsafeCell::new(unsafe { mem::zeroed::<WaitQueueEntry>() })) else {
         return;
     };
-    entry.private = (&wrapper.poll as *const PollSet).cast_mut().cast();
-    entry.func = Some(wake_poll_waiters);
-    // SAFETY: `entry` is a live, uniquely-owned zeroed waitqueue node whose
-    // list linkage has not yet been published.
-    unsafe { drm_kapi::list::init_list_head(ptr::addr_of_mut!(entry.entry)) };
+    // SAFETY: The Box gives stable storage, not yet published. UnsafeCell
+    // keeps later queue-link mutations from aliasing an exclusive Box borrow.
+    unsafe {
+        (*entry.get()).private = (&wrapper.poll as *const PollSet).cast_mut().cast();
+        (*entry.get()).func = Some(wake_poll_waiters);
+        drm_kapi::list::init_list_head(ptr::addr_of_mut!((*entry.get()).entry));
+    }
     // SAFETY: `head` is non-null and valid per caller contract; `entry` is pinned by Box.
-    unsafe { add_wait_queue(&mut *head, &mut entry) };
+    unsafe { add_wait_queue(head, entry.get()) };
     if entries.try_reserve(1).is_err() {
         // SAFETY: Removes `entry` from `head` if allocating vector space fails.
-        unsafe { remove_wait_queue(&mut *head, &mut entry) };
+        unsafe { remove_wait_queue(head, entry.get()) };
         return;
     }
     entries.push(WaitEntryOwner {

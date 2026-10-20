@@ -39,7 +39,7 @@ pub(super) unsafe fn send_event(crtc: *mut DrmCrtc, event: *mut DrmPendingVblank
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use core::{
         mem::size_of,
         ptr,
@@ -66,7 +66,7 @@ mod tests {
         ORIGIN.get_or_init(Instant::now).elapsed().as_nanos() as u64 + 1
     }
 
-    fn init_host_services() {
+    pub(crate) fn init_host_services() {
         // Only the real core's clock/lock/wake boundaries are hosted here;
         // vblank advancement is explicit, not a claim about native IRQ timing.
         static CLOCK: drm_kapi::clock::ClockOps = drm_kapi::clock::ClockOps {
@@ -131,7 +131,10 @@ mod tests {
             );
             vblank.dev = &mut dev;
             vblank.enabled = true;
-            vblank.refcount.counter = 1;
+            vblank
+                .refcount
+                .counter
+                .store(1, core::sync::atomic::Ordering::Relaxed);
             vblank.max_vblank_count = u32::MAX;
             drm_kapi::wait::init_waitqueue_head(&mut vblank.queue);
             drm_kapi::list::init_list_head(ptr::addr_of_mut!(vblank.pending_work));

@@ -6,10 +6,10 @@ use core::{
     ffi::{c_char, c_void},
     mem::{MaybeUninit, offset_of, size_of},
     ptr,
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, Ordering},
 };
 
-use ax_gpu::rdif_gpu::{Completion, GpuError};
+use ax_gpu::rdif_gpu::{Completion, CompletionStatus, GpuError};
 use ax_lazyinit::LazyInit;
 use drm_kapi::{
     config::GFP_KERNEL,
@@ -109,8 +109,6 @@ impl CompletionQueue {
 }
 
 static COMPLETIONS: LazyInit<CompletionQueue> = LazyInit::new();
-static NEXT_SEQNO: AtomicU64 = AtomicU64::new(1);
-static FENCE_CONTEXT: AtomicU64 = AtomicU64::new(0);
 
 static FENCE_OPS: DmaFenceOps = DmaFenceOps {
     get_driver_name: Some(driver_name),
@@ -132,7 +130,6 @@ pub(crate) fn init() {
     // the queue's entire lifetime. The runtime workqueue provider is installed
     // before this function is called by ax-drm initialization.
     unsafe { init_work_c(&mut *queue.work.get(), completion_worker) };
-    FENCE_CONTEXT.store(dma_fence_context_alloc(1), Ordering::Release);
 }
 
 /// This is installed as ax-gpu's sole notifier. It runs while the GPU owner
@@ -178,8 +175,8 @@ fn new_completion_with_owners(
         }
         return ptr::null_mut();
     }
-    let allocation = kmalloc(size_of::<RdifFence>(), GFP_KERNEL).cast::<RdifFence>();
-    if allocation.is_null() {
+    let fence = allocate_fence(completion);
+    if fence.is_null() {
         if let Completion::Pending(_) = completion {
             // Do not let an OOM path report a pending operation complete.
             // The caller still owns its original resources while we wait.
@@ -197,20 +194,6 @@ fn new_completion_with_owners(
         }
         return ptr::null_mut();
     }
-    // SAFETY: The KAPI allocation has the required size/alignment. Initialize
-    // the external lock and immutable completion token before dma_fence_init.
-    unsafe {
-        ptr::addr_of_mut!((*allocation).lock).write(Spinlock::new());
-        ptr::addr_of_mut!((*allocation).completion).write(completion);
-        dma_fence_init(
-            ptr::addr_of_mut!((*allocation).base),
-            ptr::addr_of!(FENCE_OPS),
-            ptr::addr_of_mut!((*allocation).lock),
-            FENCE_CONTEXT.load(Ordering::Acquire),
-            NEXT_SEQNO.fetch_add(1, Ordering::Relaxed),
-        );
-    }
-    let fence = allocation.cast::<DmaFence>();
     match completion {
         // SAFETY: 'fence' was initialized above and is a valid DmaFence; signaling it marks it completed and notifies waiters.
         Completion::Complete => unsafe { dma_fence_signal(fence) },
@@ -263,6 +246,30 @@ fn new_completion_with_owners(
         }
     }
     fence
+}
+
+fn allocate_fence(completion: Completion) -> *mut DmaFence {
+    let allocation = kmalloc(size_of::<RdifFence>(), GFP_KERNEL).cast::<RdifFence>();
+    if allocation.is_null() {
+        return ptr::null_mut();
+    }
+    // SAFETY: The KAPI allocation has the required size/alignment. Initialize
+    // the external lock and immutable completion token before dma_fence_init.
+    unsafe {
+        ptr::addr_of_mut!((*allocation).lock).write(Spinlock::new());
+        ptr::addr_of_mut!((*allocation).completion).write(completion);
+        dma_fence_init(
+            ptr::addr_of_mut!((*allocation).base),
+            ptr::addr_of!(FENCE_OPS),
+            ptr::addr_of_mut!((*allocation).lock),
+            // RDIF tokens may belong to different devices/contexts/rings.
+            // Without a timeline identity, never claim that a later token
+            // subsumes an earlier one during sync_file/reservation dedup.
+            dma_fence_context_alloc(1),
+            1,
+        );
+    }
+    allocation.cast::<DmaFence>()
 }
 
 /// Attach a display completion to the old GEM object's reservation. The
@@ -335,14 +342,22 @@ pub(crate) unsafe fn add_to_object_resv(
     if resv.is_null() {
         return -drm_kapi::config::EINVAL;
     }
-    // SAFETY: 'resv' is non-null and points to a valid DmaResv reservation object.
-    let ret = unsafe { dma_resv_reserve_fences(resv, 1) };
-    if ret != 0 {
-        return ret;
+    // SAFETY: The caller's GEM reference retains the reservation and lock.
+    // Serialize reserve+insert: another submit must not consume the capacity
+    // reserved here and turn a successful reservation into an allocation panic.
+    unsafe {
+        let lock = ptr::addr_of_mut!((*resv).lock);
+        let ret = drm_kapi::ww_mutex::ww_mutex_lock(lock, ptr::null_mut());
+        if ret != 0 {
+            return ret;
+        }
+        let ret = dma_resv_reserve_fences(resv, 1);
+        if ret == 0 {
+            dma_resv_add_fence(resv, fence, usage);
+        }
+        drm_kapi::ww_mutex::ww_mutex_unlock(lock);
+        ret
     }
-    // SAFETY: 'resv' is valid and has sufficient fence slots reserved above; 'fence' is non-null and live.
-    unsafe { dma_resv_add_fence(resv, fence, usage) };
-    0
 }
 
 fn schedule_completion_worker() {
@@ -352,7 +367,7 @@ fn schedule_completion_worker() {
     queue.requested.store(true, Ordering::Release);
     // SAFETY: `work` is initialized by `init`, lives in a static LazyInit, and
     // queue_work is safe to call from the notifier's short callback context.
-    unsafe { queue_work(SYSTEM_DFL_WQ, &mut *queue.work.get()) };
+    unsafe { queue_work(SYSTEM_DFL_WQ, queue.work.get()) };
 }
 
 /// # Safety
@@ -363,44 +378,66 @@ unsafe extern "C" fn completion_worker(_work: *mut WorkStruct) {
     };
     loop {
         queue.requested.store(false, Ordering::Release);
-        let mut node = queue.pending.lock().take();
+        let mut pending = PendingList::default();
+        pending.head = queue.pending.lock().take() as usize;
+        poll_completions(&mut pending, |completion| {
+            ax_gpu::with_gpu_for_cleanup(|gpu| gpu.completion_status(completion))
+                .and_then(core::convert::identity)
+        });
+        // Keep every unconfirmed owner pinned, without blocking unrelated
+        // contexts/rings behind it. IRQ service schedules the next pass.
+        let mut node = pending.take();
+        let mut shared = queue.pending.lock();
         while !node.is_null() {
-            // SAFETY: 'node' was popped from queue.pending, is non-null, properly aligned, and points to an initialized PendingFence.
-            let record = unsafe { node.read() };
-            // SAFETY: 'node' was allocated with kmalloc and has been fully read into 'record'; deallocating it here prevents leaks.
-            unsafe { kfree(node.cast::<c_void>()) };
-            node = record.next;
-            let fence = record.fence;
-            // SAFETY: Each queued item owns a dma_fence reference; the C base
-            // is the first field of RdifFence, so this recovers its token.
-            let completion = unsafe {
-                (*fence
-                    .cast::<u8>()
-                    .sub(offset_of!(RdifFence, base))
-                    .cast::<RdifFence>())
-                .completion
-            };
-            let result = wait_for_completion(completion);
-            if result.is_err() {
-                // DeviceLost is terminal for every token. Other terminal
-                // transport errors likewise cannot be reported as success.
-                // SAFETY: 'fence' is a valid DmaFence owned by this completion worker.
-                unsafe { dma_fence_set_error(fence, NEG_EIO) };
-            }
-            // `wait_completion` returned after leaving the ax-gpu lock, so
-            // dma_fence callbacks may safely wake sync_file/poll consumers.
-            // SAFETY: 'fence' is a valid live DmaFence; all keepalive references and events are consumed here.
+            // SAFETY: The detached list exclusively owns these live nodes.
+            let next = unsafe { (*node).next };
+            shared.push(node);
+            node = next;
+        }
+        drop(shared);
+        if !queue.requested.swap(false, Ordering::AcqRel) {
+            return;
+        }
+    }
+}
+
+/// Check each independent RDIF token once; only confirmed completion or DMA-
+/// stopping device loss authorizes dropping the queue's resource owners.
+fn poll_completions(
+    pending: &mut PendingList,
+    mut status: impl FnMut(Completion) -> Result<CompletionStatus, GpuError>,
+) {
+    let mut node = pending.take();
+    while !node.is_null() {
+        // SAFETY: This detached list exclusively owns each node and its fence.
+        let (next, fence, completion) = unsafe {
+            let fence = (*node).fence;
+            ((*node).next, fence, (*fence.cast::<RdifFence>()).completion)
+        };
+        let terminal = match status(completion) {
+            Ok(CompletionStatus::Complete) => Some(false),
+            Err(GpuError::DeviceLost) => Some(true),
+            Ok(CompletionStatus::Pending) | Err(_) => None,
+        };
+        if let Some(failed) = terminal {
+            // SAFETY: The terminal device state permits consuming all owners;
+            // no GPU/pending-list lock is held across callbacks or final puts.
             unsafe {
+                let record = node.read();
+                kfree(node.cast::<c_void>());
+                if failed {
+                    dma_fence_set_error(fence, NEG_EIO);
+                }
                 dma_fence_signal(fence);
                 send_event(record.event_crtc, record.event);
                 drm_gem_object_put(record.keepalive_object);
                 drm_framebuffer_put(record.keepalive_framebuffer);
                 dma_fence_put(fence);
             }
+        } else {
+            pending.push(node);
         }
-        if !queue.requested.swap(false, Ordering::AcqRel) {
-            return;
-        }
+        node = next;
     }
 }
 
@@ -467,4 +504,71 @@ unsafe extern "C" fn release_fence(fence: *mut DmaFence) {
                 .cast::<c_void>(),
         )
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use core::num::NonZeroU64;
+
+    use drm_kapi::dma_fence::dma_fence_is_signaled;
+
+    use super::*;
+
+    #[test]
+    fn independent_completions_do_not_block_or_release_unconfirmed_owners() {
+        crate::backend::presentation::tests::init_host_services();
+        let mut pending = PendingList::default();
+        // SAFETY: Stack GEM shells retain their original references throughout
+        // the test; the production queue takes and releases only extra pins.
+        unsafe {
+            let mut objects: [DrmGemObject; 3] = core::mem::zeroed();
+            let mut fences = [ptr::null_mut(); 3];
+            for (index, object) in objects.iter_mut().enumerate() {
+                drm_kapi::memory::kref_init(ptr::addr_of_mut!(object.refcount));
+                drm_gem_object_get(object);
+                let fence = allocate_fence(Completion::Pending(
+                    NonZeroU64::new(index as u64 + 1).unwrap(),
+                ));
+                assert!(!fence.is_null());
+                fences[index] = dma_fence_get(fence);
+                let node = kmalloc(size_of::<PendingFence>(), GFP_KERNEL).cast::<PendingFence>();
+                assert!(!node.is_null());
+                node.write(PendingFence {
+                    fence,
+                    next: ptr::null_mut(),
+                    keepalive_object: object,
+                    keepalive_framebuffer: ptr::null_mut(),
+                    event_crtc: ptr::null_mut(),
+                    event: ptr::null_mut(),
+                });
+                pending.push(node);
+            }
+            assert_ne!(
+                (*fences[0]).context,
+                (*fences[1]).context,
+                "independent RDIF tokens must not be deduplicated as one timeline"
+            );
+            poll_completions(&mut pending, |completion| match completion {
+                Completion::Pending(id) if id.get() == 1 => Ok(CompletionStatus::Pending),
+                Completion::Pending(id) if id.get() == 2 => Ok(CompletionStatus::Complete),
+                _ => Err(GpuError::Busy),
+            });
+            assert!(!dma_fence_is_signaled(fences[0]));
+            assert!(dma_fence_is_signaled(fences[1]));
+            assert!(!dma_fence_is_signaled(fences[2]));
+            for (object, expected) in objects.iter().zip([2, 1, 2]) {
+                assert_eq!(drm_kapi::memory::kref_read(&object.refcount), expected);
+            }
+            // A transient query failure did not authorize freeing backing.
+            // DeviceLost is the RDIF guarantee that all DMA has stopped.
+            poll_completions(&mut pending, |_| Err(GpuError::DeviceLost));
+            assert_eq!(pending.head, 0);
+            for (index, fence) in fences.into_iter().enumerate() {
+                assert!(dma_fence_is_signaled(fence));
+                assert_eq!((*fence).error, if index == 1 { 0 } else { NEG_EIO });
+                assert_eq!(drm_kapi::memory::kref_read(&objects[index].refcount), 1);
+                dma_fence_put(fence);
+            }
+        }
+    }
 }

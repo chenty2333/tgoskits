@@ -1,5 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# This application exercises CPU mappings of host Vulkan memory. On Intel xe
+# the required KVM/PAT contract is only available in QEMU 11 and newer.
+python3 - <<'CHECK_QEMU'
+import re, subprocess
+version = subprocess.check_output(["qemu-system-x86_64", "--version"], text=True)
+match = re.search(r"version (\d+)\.", version)
+if not match or int(match.group(1)) < 11:
+    raise SystemExit("venus-regression requires QEMU >= 11 with KVM honor-guest-pat; ordinary 2D suites are unaffected")
+CHECK_QEMU
 : "${STARRY_STAGING_ROOT:?}" "${STARRY_OVERLAY_DIR:?}" "${STARRY_ROOTFS:?}" "${STARRY_APP_DIR:?}"
 # rdump requires complete ownership semantics before it starts, not a retry
 # after a partially extracted image. Keep fakeroot active through preparation.

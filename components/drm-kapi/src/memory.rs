@@ -580,19 +580,19 @@ pub fn atomic_read(value: &AtomicT) -> i32 {
 
 /// Atomic set (`atomic_set`, relaxed ordering).
 #[inline]
-pub fn atomic_set(value: &mut AtomicT, new_value: i32) {
+pub fn atomic_set(value: &AtomicT, new_value: i32) {
     atomic(value).store(new_value, Ordering::Relaxed);
 }
 
 /// Atomic increment (`atomic_inc`, relaxed ordering).
 #[inline]
-pub fn atomic_inc(value: &mut AtomicT) {
+pub fn atomic_inc(value: &AtomicT) {
     atomic(value).fetch_add(1, Ordering::Relaxed);
 }
 
 /// `atomic_inc_not_zero()` with Linux's full ordering on successful RMW.
 #[inline]
-pub fn atomic_inc_not_zero(value: &mut AtomicT) -> bool {
+pub fn atomic_inc_not_zero(value: &AtomicT) -> bool {
     let counter = atomic(value);
     let mut old = counter.load(Ordering::Relaxed);
     while old != 0 {
@@ -620,7 +620,7 @@ pub unsafe fn atomic_dec_and_lock_irqsave(
     flags: *mut core::ffi::c_ulong,
 ) -> bool {
     // SAFETY: `value` is non-null, aligned, and valid for atomic operations per caller contract.
-    let old = atomic(unsafe { &mut *value }).fetch_sub(1, Ordering::AcqRel);
+    let old = atomic(unsafe { &*value }).fetch_sub(1, Ordering::AcqRel);
     if old != 1 {
         return false;
     }
@@ -634,7 +634,7 @@ pub unsafe fn atomic_dec_and_lock_irqsave(
 
 /// Atomic decrement (`atomic_dec`, relaxed ordering).
 #[inline]
-pub fn atomic_dec(value: &mut AtomicT) {
+pub fn atomic_dec(value: &AtomicT) {
     atomic(value).fetch_sub(1, Ordering::Relaxed);
 }
 
@@ -646,19 +646,19 @@ pub fn smp_rmb() {
 
 /// Atomic addition (`atomic_add`, relaxed ordering).
 #[inline]
-pub fn atomic_add(addend: i32, value: &mut AtomicT) {
+pub fn atomic_add(addend: i32, value: &AtomicT) {
     atomic(value).fetch_add(addend, Ordering::Relaxed);
 }
 
 /// Atomic subtraction (`atomic_sub`, relaxed ordering).
 #[inline]
-pub fn atomic_sub(subtrahend: i32, value: &mut AtomicT) {
+pub fn atomic_sub(subtrahend: i32, value: &AtomicT) {
     atomic(value).fetch_sub(subtrahend, Ordering::Relaxed);
 }
 
 /// Atomic add-unless (`atomic_add_unless`, full ordering).
 #[inline]
-pub fn atomic_add_unless(value: &mut AtomicT, addend: i32, unless: i32) -> bool {
+pub fn atomic_add_unless(value: &AtomicT, addend: i32, unless: i32) -> bool {
     let counter = atomic(value);
     let mut old = counter.load(Ordering::Relaxed);
     loop {
@@ -679,13 +679,13 @@ pub fn atomic_add_unless(value: &mut AtomicT, addend: i32, unless: i32) -> bool 
 
 /// Atomic decrement-and-test (`atomic_dec_and_test`, full ordering).
 #[inline]
-pub fn atomic_dec_and_test(value: &mut AtomicT) -> bool {
+pub fn atomic_dec_and_test(value: &AtomicT) -> bool {
     atomic(value).fetch_sub(1, Ordering::SeqCst).wrapping_sub(1) == 0
 }
 
 /// Atomic subtract-and-test (`atomic_sub_and_test`, full ordering).
 #[inline]
-pub fn atomic_sub_and_test(subtrahend: i32, value: &mut AtomicT) -> bool {
+pub fn atomic_sub_and_test(subtrahend: i32, value: &AtomicT) -> bool {
     atomic(value)
         .fetch_sub(subtrahend, Ordering::SeqCst)
         .wrapping_sub(subtrahend)
@@ -695,7 +695,7 @@ pub fn atomic_sub_and_test(subtrahend: i32, value: &mut AtomicT) -> bool {
 /// Atomic fetch-increment (`atomic_fetch_inc`, full ordering), returning the
 /// value before incrementing.
 #[inline]
-pub fn atomic_fetch_inc(value: &mut AtomicT) -> i32 {
+pub fn atomic_fetch_inc(value: &AtomicT) -> i32 {
     atomic(value).fetch_add(1, Ordering::SeqCst)
 }
 
@@ -708,7 +708,7 @@ pub fn atomic_fetch_inc(value: &mut AtomicT) -> i32 {
 #[inline]
 pub unsafe fn kref_init(value: *mut Kref) {
     // SAFETY: `value` is guaranteed by caller to be non-null, properly aligned, and exclusively accessed for initialization.
-    let reference = unsafe { &mut (*value).refcount };
+    let reference = unsafe { &(*value).refcount };
     refcount_set(reference, 1);
 }
 
@@ -726,8 +726,8 @@ pub unsafe fn kref_init(value: *mut Kref) {
 /// the call, and the caller must own a reference that keeps its object alive.
 #[inline]
 pub unsafe fn kref_get(value: *mut Kref) {
-    // SAFETY: `value` points to a live `Kref` per caller contract, and `&mut (*value).refcount` accesses the atomic counter.
-    let got_reference = unsafe { refcount_inc_not_zero(&mut (*value).refcount) };
+    // SAFETY: `value` points to a live `Kref` per caller contract, and `&(*value).refcount` accesses the atomic counter.
+    let got_reference = unsafe { refcount_inc_not_zero(&(*value).refcount) };
     if !got_reference {
         // `refcount_inc()` warns and saturates on a zero count (a likely UAF).
         // `inc_not_zero` intentionally leaves zero unchanged, so apply that
@@ -754,7 +754,7 @@ pub unsafe fn kref_get(value: *mut Kref) {
 #[inline]
 pub unsafe fn kref_put(value: *mut Kref, release: unsafe extern "C" fn(*mut Kref)) -> i32 {
     // SAFETY: `value` points to a live `Kref` per caller contract.
-    if unsafe { refcount_dec_and_test(&mut (*value).refcount) } {
+    if unsafe { refcount_dec_and_test(&(*value).refcount) } {
         // SAFETY: The reference count reached zero, so the final reference is dropped and `release` is invoked to destroy the object.
         unsafe { release(value) };
         1
@@ -772,13 +772,13 @@ pub fn kref_read<T: RefcountView + ?Sized>(value: &T) -> u32 {
 
 /// Increment a `kref` unless it has reached zero (`kref_get_unless_zero`).
 #[inline]
-pub fn kref_get_unless_zero(value: &mut Kref) -> bool {
-    refcount_inc_not_zero(&mut value.refcount)
+pub fn kref_get_unless_zero(value: &Kref) -> bool {
+    refcount_inc_not_zero(&value.refcount)
 }
 
 /// Set a Linux `refcount_t` using its relaxed initialization ordering.
 #[inline]
-pub fn refcount_set(value: &mut RefcountT, new_value: i32) {
+pub fn refcount_set(value: &RefcountT, new_value: i32) {
     atomic(&value.refs).store(new_value, Ordering::Relaxed);
 }
 
@@ -790,7 +790,7 @@ pub fn refcount_read(value: &RefcountT) -> u32 {
 
 /// Increment a `refcount_t` unless it is zero.  Invalid overflows saturate at
 /// Linux's `REFCOUNT_SATURATED` value instead of wrapping back to zero.
-pub fn refcount_inc_not_zero(value: &mut RefcountT) -> bool {
+pub fn refcount_inc_not_zero(value: &RefcountT) -> bool {
     let counter = atomic(&value.refs);
     let mut old = counter.load(Ordering::Relaxed);
     loop {
@@ -810,7 +810,7 @@ pub fn refcount_inc_not_zero(value: &mut RefcountT) -> bool {
 
 /// Decrement a `refcount_t`, returning true only for the valid 1-to-0
 /// transition (`refcount_dec_and_test`).
-pub fn refcount_dec_and_test(value: &mut RefcountT) -> bool {
+pub fn refcount_dec_and_test(value: &RefcountT) -> bool {
     let counter = atomic(&value.refs);
     let old = counter.fetch_sub(1, Ordering::Release);
     if old == 1 {
@@ -826,7 +826,7 @@ pub fn refcount_dec_and_test(value: &mut RefcountT) -> bool {
 /// Decrement without testing (`refcount_dec`).  Linux deliberately leaks on a
 /// decrement from one or below: callers that need to release the final object
 /// must use `refcount_dec_and_test` and run its destructor themselves.
-pub fn refcount_dec(value: &mut RefcountT) {
+pub fn refcount_dec(value: &RefcountT) {
     let counter = atomic(&value.refs);
     let old = counter.fetch_sub(1, Ordering::Release);
     if old <= 1 {
@@ -893,13 +893,7 @@ fn supports_sleepable_allocation(flags: u32) -> bool {
 }
 
 fn atomic(value: &AtomicT) -> &AtomicI32 {
-    // AtomicT is the source-layout binding for Linux atomic_t: a repr(C) i32
-    // counter at the same 4-byte alignment as AtomicI32.  All access to this
-    // counter in the LinuxKPI layer is performed through this atomic view.
-    let counter = ptr::addr_of!(value.counter).cast_mut();
-    // SAFETY: AtomicT and AtomicI32 have matching size/alignment here, and the
-    // referenced counter lives for at least the duration of the borrow.
-    unsafe { AtomicI32::from_ptr(counter) }
+    &value.counter
 }
 
 /// Read-only view of the atomic counter embedded in either `refcount_t` or
@@ -1025,23 +1019,50 @@ mod tests {
     }
 
     #[test]
-    fn atomic_and_refcount_ordered_transitions() {
-        let mut atomic = AtomicT { counter: 0 };
-        atomic_set(&mut atomic, 2);
-        assert_eq!(atomic_read(&atomic), 2);
-        assert!(atomic_add_unless(&mut atomic, 1, 0));
-        assert_eq!(atomic_fetch_inc(&mut atomic), 3);
-        assert!(!atomic_dec_and_test(&mut atomic));
-        assert!(atomic_sub_and_test(3, &mut atomic));
-
-        let mut reference = RefcountT {
-            refs: AtomicT { counter: 1 },
+    fn shared_reference_counts_have_one_final_owner() {
+        let reference = RefcountT {
+            refs: AtomicT {
+                counter: AtomicI32::new(1),
+            },
         };
-        assert!(refcount_inc_not_zero(&mut reference));
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                let reference = &reference;
+                scope.spawn(move || {
+                    for _ in 0..128 {
+                        assert!(refcount_inc_not_zero(reference));
+                        assert!(!refcount_dec_and_test(reference));
+                    }
+                });
+            }
+        });
+        assert_eq!(refcount_read(&reference), 1);
+        assert!(refcount_dec_and_test(&reference));
+        assert!(!refcount_inc_not_zero(&reference));
+    }
+
+    #[test]
+    fn atomic_and_refcount_ordered_transitions() {
+        let atomic = AtomicT {
+            counter: AtomicI32::new(0),
+        };
+        atomic_set(&atomic, 2);
+        assert_eq!(atomic_read(&atomic), 2);
+        assert!(atomic_add_unless(&atomic, 1, 0));
+        assert_eq!(atomic_fetch_inc(&atomic), 3);
+        assert!(!atomic_dec_and_test(&atomic));
+        assert!(atomic_sub_and_test(3, &atomic));
+
+        let reference = RefcountT {
+            refs: AtomicT {
+                counter: AtomicI32::new(1),
+            },
+        };
+        assert!(refcount_inc_not_zero(&reference));
         assert_eq!(refcount_read(&reference), 2);
-        assert!(!refcount_dec_and_test(&mut reference));
-        assert!(refcount_dec_and_test(&mut reference));
-        assert!(!refcount_inc_not_zero(&mut reference));
+        assert!(!refcount_dec_and_test(&reference));
+        assert!(refcount_dec_and_test(&reference));
+        assert!(!refcount_inc_not_zero(&reference));
     }
 }
 

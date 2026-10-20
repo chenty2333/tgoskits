@@ -1,7 +1,12 @@
 # Venus 与 VirGL 资源回收回归
 
 在具有可读写 `/dev/dri/renderD128`、KVM 及支持 Venus 的 QEMU/virglrenderer 的
-x86_64 主机上运行：
+x86_64 主机上运行。QEMU 必须为 11 或更新版本；配置显式开启
+`kvm,honor-guest-pat=on`，Intel xe 的 host-visible 映射还要求宿主 Linux 6.16+。
+这是 [Mesa Venus 的平台要求](https://docs.mesa3d.org/drivers/venus.html)，不是关闭
+fence-feedback 的替代方案。
+
+运行：
 
 ```sh
 cargo xtask starry app qemu -t venus-regression --arch x86_64 --cap virgl
@@ -21,3 +26,8 @@ Venus，设备名可能包含 `Virtio-GPU Venus (llvmpipe ...)`；这是宿主�
 
 这些结果证明 QEMU 和当前主机渲染栈上的命令、映射与回收路径，不代表其他物理
 GPU 或显示器的扫描输出已验证。
+
+CI 边界：仓库 `container/Dockerfile` 已选用 QEMU 11.1.1，但普通容器不声明 `virgl`，
+也未构建图形渲染依赖，因此普通 `starry app qemu --all` 跳过此应用，不构成 Venus
+已验证。图形运行器必须提供 KVM、宿主渲染栈并显式传入 `--cap virgl`；版本不满足时
+预构建直接失败，不降级到旧 QEMU 参数或关闭反馈。普通四架构 2D/system 门禁不变。

@@ -151,7 +151,7 @@ fn unplug_wakes_an_already_sleeping_epoll_error_only_observer() {
                 let wrapper = KAPI_FILES.lock().get(&(raw as usize)).and_then(Weak::upgrade).unwrap();
                 // This isolated device cannot notify before the parent unplugs
                 // it. Exercise each production adapter's actual wake callback.
-                for entry in wrapper.wait_entries.lock().iter_mut() { entry.entry.func = Some(callback); }
+                for entry in wrapper.wait_entries.lock().iter() { (*entry.entry.get()).func = Some(callback); }
                 published.store(dev as usize, Ordering::Release);
                 let events = crate::task::future::block_on(crate::task::future::poll_shared(
                     || {

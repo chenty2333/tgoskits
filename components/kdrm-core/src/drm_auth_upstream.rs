@@ -38,14 +38,15 @@ const EACCES: i32 = 13;
 /// `fpriv` must be non-null, properly aligned, and point to a live `DrmFile` whose
 /// device `master_mutex` is held by the caller.
 unsafe fn drm_is_current_master_locked(fpriv: *mut DrmFile) -> bool {
-    // SAFETY: The caller holds the appropriate lookup/device lock and guarantees `fpriv`,
-    // its `minor`, and `dev` remain live and readable without concurrent modification.
+    // SAFETY: The file retains its minor/device and master_mutex protects both
+    // master identities. Read only the protected field, without borrowing the
+    // entire device whose unrelated state can change concurrently.
     unsafe {
         (*fpriv)
             .is_master
             .load(core::sync::atomic::Ordering::Relaxed)
             && !(*fpriv).master.is_null()
-            && drm_lease_owner((*fpriv).master) == (*(*fpriv).minor).dev.as_ref().unwrap().master
+            && drm_lease_owner((*fpriv).master) == (*(*(*fpriv).minor).dev).master
     }
 }
 

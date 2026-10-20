@@ -344,8 +344,7 @@ pub unsafe extern "C" fn __drm_mode_object_find(
             drm_dbg_kms!(dev, "[OBJECT:%d] not included in lease", id);
             obj = core::ptr::null_mut();
         }
-        if !obj.is_null() && (*obj).free_cb.is_some() && !kref_get_unless_zero(&mut (*obj).refcount)
-        {
+        if !obj.is_null() && (*obj).free_cb.is_some() && !kref_get_unless_zero(&(*obj).refcount) {
             obj = core::ptr::null_mut();
         }
         mutex_unlock(idr_mutex);

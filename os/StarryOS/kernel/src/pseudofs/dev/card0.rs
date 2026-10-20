@@ -288,7 +288,7 @@ impl Card0File {
             (*entry).private = (&self.poll as *const PollSet).cast_mut().cast();
             (*entry).func = Some(wake_poll_waiters);
             init_list_head(ptr::addr_of_mut!((*entry).entry));
-            add_wait_queue(&mut *ptr::addr_of_mut!((*private).event_wait), &mut *entry);
+            add_wait_queue(ptr::addr_of_mut!((*private).event_wait), ptr::addr_of_mut!(*entry));
         }
         Ok(())
     }
@@ -548,7 +548,7 @@ impl Drop for Card0File {
             let private = (*self.raw()).private_data.cast::<DrmFile>();
             if !private.is_null() {
                 let entry = self.wait_entry.get();
-                remove_wait_queue(&mut *ptr::addr_of_mut!((*private).event_wait), &mut *entry);
+                remove_wait_queue(ptr::addr_of_mut!((*private).event_wait), ptr::addr_of_mut!(*entry));
                 drm_release(ptr::null_mut(), self.raw());
             }
         }

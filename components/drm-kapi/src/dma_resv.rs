@@ -175,15 +175,35 @@ pub unsafe fn dma_resv_add_fence_native(resv: *mut DmaResv, fence: *mut DmaFence
         .unwrap_or_else(|error| panic!("dma_resv_add_fence failed: {error}"));
     // SAFETY: `state` is a valid `ReservationState` pointer.
     let mut entries = unsafe { (*state).entries.lock() };
-    if entries.len() == entries.capacity() {
+    // Reuse a completed slot rather than retaining every historical submit
+    // until GEM_CLOSE. Only inspect the published completion flag here: driver
+    // polling and arbitrary release callbacks must not run under entries.lock.
+    let reusable = entries.iter().position(|entry| {
+        // SAFETY: Every entry owns a live fence reference under this mutex.
+        unsafe { crate::dma_fence::is_done_flag(entry.fence) }
+    });
+    if reusable.is_none() && entries.len() == entries.capacity() {
         entries
             .try_reserve(1)
             .expect("dma_resv_add_fence requires successful prior reservation");
     }
     // SAFETY: the caller passes a live fence; the table takes its own reference.
     unsafe { dma_fence_get(fence) };
-    entries.push(ReservedFence { fence, usage });
+    let old = if let Some(index) = reusable {
+        Some(core::mem::replace(
+            &mut entries[index],
+            ReservedFence { fence, usage },
+        ))
+    } else {
+        entries.push(ReservedFence { fence, usage });
+        None
+    };
     drop(entries);
+    if let Some(old) = old {
+        // SAFETY: Replacement transferred the table's old owned reference to
+        // this local. The destructor runs outside the reservation mutex.
+        unsafe { dma_fence_put(old.fence) };
+    }
 }
 
 /// Iterate reservation fences with Linux's usage ordering and a live cursor
@@ -471,7 +491,55 @@ mod tests {
             assert!(dma_resv_iter_next(&mut cursor).is_null());
             dma_fence_put(cursor.fence);
             dma_resv_fini(&mut resv);
-            assert_eq!(fence.refcount.refcount.refs.counter, 1);
+            assert_eq!(
+                fence
+                    .refcount
+                    .refcount
+                    .refs
+                    .counter
+                    .load(core::sync::atomic::Ordering::Relaxed),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn completed_reservation_slots_release_old_fences_without_losing_pending_ones() {
+        // SAFETY: Every fence/lock remains on this stack until the reservation
+        // and its iterator references are released; the test retains one ref.
+        unsafe {
+            let ops: DmaFenceOps = core::mem::zeroed();
+            let mut lock: Spinlock = core::mem::zeroed();
+            spin_lock_init(&mut lock);
+            let mut fences: [DmaFence; 33] = core::mem::zeroed();
+            let mut resv: DmaResv = core::mem::zeroed();
+            dma_resv_init(&mut resv);
+            for (index, fence) in fences.iter_mut().enumerate() {
+                dma_fence_init(fence, &ops, &mut lock, index as u64 + 1, 1);
+                if index != 0 {
+                    dma_fence_signal(fence);
+                }
+                assert_eq!(dma_resv_reserve_fences(&mut resv, 1), 0);
+                dma_resv_add_fence_native(&mut resv, fence, DMA_RESV_USAGE_KERNEL);
+            }
+            let mut cursor = DmaResvIter::new(&mut resv, DMA_RESV_USAGE_KERNEL);
+            assert_eq!(
+                dma_resv_iter_next(&mut cursor),
+                ptr::addr_of_mut!(fences[0])
+            );
+            assert_eq!(
+                dma_resv_iter_next(&mut cursor),
+                ptr::addr_of_mut!(fences[32])
+            );
+            assert!(dma_resv_iter_next(&mut cursor).is_null());
+            resv_iter_end(&mut cursor);
+            for fence in &fences[1..32] {
+                assert_eq!(crate::memory::kref_read(&fence.refcount), 1);
+            }
+            dma_resv_fini(&mut resv);
+            for fence in &fences {
+                assert_eq!(crate::memory::kref_read(&fence.refcount), 1);
+            }
         }
     }
 
@@ -511,8 +579,24 @@ mod tests {
             // used to panic because the reservation path passed a Vec buffer.
             dma_fence_put(singleton);
             dma_resv_fini(&mut resv);
-            assert_eq!(first.refcount.refcount.refs.counter, 1);
-            assert_eq!(second.refcount.refcount.refs.counter, 1);
+            assert_eq!(
+                first
+                    .refcount
+                    .refcount
+                    .refs
+                    .counter
+                    .load(core::sync::atomic::Ordering::Relaxed),
+                1
+            );
+            assert_eq!(
+                second
+                    .refcount
+                    .refcount
+                    .refs
+                    .counter
+                    .load(core::sync::atomic::Ordering::Relaxed),
+                1
+            );
             crate::rcu::rcu_barrier();
         }
     }

@@ -15,7 +15,8 @@ use drm_kapi::{
     config::{EAGAIN, EFAULT, EINVAL, ENODEV, ENOMEM},
     list::{init_list_head, list_add, list_add_tail, list_del, list_del_init, list_empty},
     locks::{
-        spin_lock, spin_lock_init, spin_lock_irqsave_raw, spin_unlock, spin_unlock_irqrestore_raw,
+        spin_lock_init, spin_lock_irqsave_raw, spin_lock_raw, spin_unlock_irqrestore_raw,
+        spin_unlock_raw,
     },
     memory::{atomic_dec, atomic_dec_and_test, atomic_inc, kfree},
     mm_native::copy_to_user,
@@ -351,11 +352,11 @@ pub unsafe extern "C" fn drm_open(inode: *mut c_void, filp: *mut File) -> i32 {
         if need_global {
             mutex_lock(core::ptr::addr_of_mut!(drm_global_mutex));
         }
-        atomic_inc(&mut (*dev).open_count);
+        atomic_inc(&(*dev).open_count);
 
         let retcode = drm_open_helper(filp, minor);
         if retcode != 0 {
-            atomic_dec(&mut (*dev).open_count);
+            atomic_dec(&(*dev).open_count);
             if need_global {
                 mutex_unlock(core::ptr::addr_of_mut!(drm_global_mutex));
             }
@@ -394,7 +395,7 @@ pub unsafe extern "C" fn drm_release(_inode: *mut c_void, filp: *mut File) -> i3
 
         drm_close_helper(filp);
 
-        if atomic_dec_and_test(&mut (*dev).open_count) {
+        if atomic_dec_and_test(&(*dev).open_count) {
             drm_lastclose(dev);
         }
 
@@ -435,12 +436,12 @@ pub unsafe extern "C" fn drm_open_minor_index(minor_index: u32, filp: *mut File)
         unsafe { mutex_lock(core::ptr::addr_of_mut!(drm_global_mutex)) };
     }
     // SAFETY: dev is valid; increments open_count.
-    unsafe { atomic_inc(&mut (*dev).open_count) };
+    unsafe { atomic_inc(&(*dev).open_count) };
     // SAFETY: filp and minor are valid pointers.
     let retcode = unsafe { drm_open_helper(filp, minor) };
     if retcode != 0 {
         // SAFETY: rolls back open_count on error.
-        unsafe { atomic_dec(&mut (*dev).open_count) };
+        unsafe { atomic_dec(&(*dev).open_count) };
         if need_global {
             // SAFETY: releasing global mutex on error.
             unsafe { mutex_unlock(core::ptr::addr_of_mut!(drm_global_mutex)) };
@@ -493,7 +494,7 @@ pub unsafe extern "C" fn drm_release_noglobal(_inode: *mut c_void, filp: *mut Fi
 
         drm_close_helper(filp);
 
-        if atomic_dec_and_test(&mut (*dev).open_count) {
+        if atomic_dec_and_test(&(*dev).open_count) {
             mutex_lock(core::ptr::addr_of_mut!(drm_global_mutex));
             drm_lastclose(dev);
             mutex_unlock(core::ptr::addr_of_mut!(drm_global_mutex));
@@ -525,6 +526,21 @@ unsafe fn drm_read_copy_to_user(
         -(EFAULT as isize)
     } else {
         len as isize
+    }
+}
+
+/// # Safety
+/// The file and its minor/device remain live while the caller retains the fd.
+unsafe fn events_pending(file: *mut DrmFile) -> bool {
+    // SAFETY: The file retains its device. Producers and consumers use this
+    // same lock for event_list; a readiness probe is a reader of that state.
+    unsafe {
+        let dev = (*(*file).minor).dev;
+        let mut flags = 0;
+        spin_lock_irqsave_raw(core::ptr::addr_of_mut!((*dev).event_lock), &mut flags);
+        let pending = !list_empty(&(*file).event_list);
+        spin_unlock_irqrestore_raw(core::ptr::addr_of_mut!((*dev).event_lock), flags);
+        pending
     }
 }
 
@@ -589,9 +605,8 @@ unsafe fn drm_read_core(
 
                 mutex_unlock(core::ptr::addr_of_mut!((*file_priv).event_read_lock));
                 let wait_ret = wait_event_interruptible!(
-                    (*file_priv).event_wait,
-                    !list_empty(&(*file_priv).event_list)
-                        || (*dev).unplugged.load(Ordering::Acquire),
+                    core::ptr::addr_of_mut!((*file_priv).event_wait),
+                    events_pending(file_priv) || (*dev).unplugged.load(Ordering::Acquire),
                 );
                 if wait_ret >= 0 {
                     ret = mutex_lock_interruptible(core::ptr::addr_of_mut!(
@@ -614,7 +629,10 @@ unsafe fn drm_read_core(
                         core::ptr::addr_of_mut!((*file_priv).event_list),
                     );
                     spin_unlock_irqrestore_raw(core::ptr::addr_of_mut!((*dev).event_lock), flags);
-                    wake_up_interruptible_poll(&mut (*file_priv).event_wait, EPOLLIN | EPOLLRDNORM);
+                    wake_up_interruptible_poll(
+                        core::ptr::addr_of_mut!((*file_priv).event_wait),
+                        EPOLLIN | EPOLLRDNORM,
+                    );
                     break;
                 }
 
@@ -630,7 +648,10 @@ unsafe fn drm_read_core(
                         core::ptr::addr_of_mut!((*file_priv).event_list),
                     );
                     spin_unlock_irqrestore_raw(core::ptr::addr_of_mut!((*dev).event_lock), flags);
-                    wake_up_interruptible_poll(&mut (*file_priv).event_wait, EPOLLIN | EPOLLRDNORM);
+                    wake_up_interruptible_poll(
+                        core::ptr::addr_of_mut!((*file_priv).event_wait),
+                        EPOLLIN | EPOLLRDNORM,
+                    );
                     break;
                 }
 
@@ -720,7 +741,7 @@ pub unsafe extern "C" fn drm_poll(filp: *mut File, wait: *mut c_void) -> u32 {
         );
 
         let mut mask = 0;
-        if !list_empty(&(*file_priv).event_list) {
+        if events_pending(file_priv) {
             mask |= EPOLLIN | EPOLLRDNORM;
         }
         if (*dev).unplugged.load(Ordering::Acquire) {
@@ -856,7 +877,7 @@ unsafe fn drm_send_event_helper(_dev: *mut DrmDevice, e: *mut DrmPendingEvent, t
             core::ptr::addr_of_mut!((*e).link),
             core::ptr::addr_of_mut!((*(*e).file_priv).event_list),
         );
-        wake_up(&mut (*(*e).file_priv).event_wait);
+        wake_up(core::ptr::addr_of_mut!((*(*e).file_priv).event_wait));
     }
 }
 
@@ -1040,7 +1061,7 @@ pub unsafe extern "C" fn drm_show_memory_stats(p: *mut DrmPrinter, file: *mut Dr
         };
         let mut supported_status: u32 = 0;
 
-        spin_lock(&mut (*file).table_lock);
+        spin_lock_raw(core::ptr::addr_of_mut!((*file).table_lock));
         crate::drm_mode_object_upstream::idr_for_each(
             core::ptr::addr_of_mut!((*file).object_idr),
             |_id, ptr| {
@@ -1072,7 +1093,7 @@ pub unsafe extern "C" fn drm_show_memory_stats(p: *mut DrmPrinter, file: *mut Dr
                 }
             },
         );
-        spin_unlock(&mut (*file).table_lock);
+        spin_unlock_raw(core::ptr::addr_of_mut!((*file).table_lock));
 
         drm_print_memory_stats(p, &stats, supported_status, c"memory".as_ptr());
     }

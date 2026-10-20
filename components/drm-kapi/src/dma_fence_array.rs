@@ -184,7 +184,10 @@ pub unsafe extern "C" fn dma_fence_array_create(
     // and `num_fences` inline callback nodes, so every field write is in bounds.
     unsafe {
         (*array).num_fences = num_fences;
-        (*array).num_pending.counter = num_fences as i32;
+        (*array)
+            .num_pending
+            .counter
+            .store(num_fences as i32, core::sync::atomic::Ordering::Relaxed);
         (*array).fences = fences;
         crate::irq_work::init_irq_work(ptr::addr_of_mut!((*array).work), array_deferred_work);
         init_container_fence(
@@ -295,7 +298,7 @@ unsafe extern "C" fn array_member_signaled(member: *mut DmaFence, callback: *mut
         let node = callback.cast::<DmaFenceArrayCallback>();
         let array = (*node).array;
         record_member_error(array, (*member).error);
-        if atomic_sub_and_test(1, &mut (*array).num_pending) {
+        if atomic_sub_and_test(1, &(*array).num_pending) {
             crate::irq_work::irq_work_queue(ptr::addr_of_mut!((*array).work));
         } else {
             dma_fence_put(ptr::addr_of_mut!((*array).base));
@@ -331,7 +334,7 @@ unsafe extern "C" fn array_enable_signaling(fence: *mut DmaFence) -> bool {
                 // The member already signaled, so no callback will run for it.
                 record_member_error(array, (*member).error);
                 dma_fence_put(ptr::addr_of_mut!((*array).base));
-                if atomic_sub_and_test(1, &mut (*array).num_pending) {
+                if atomic_sub_and_test(1, &(*array).num_pending) {
                     clear_pending_error(array);
                     return false;
                 }

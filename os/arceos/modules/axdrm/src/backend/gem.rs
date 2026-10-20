@@ -1213,10 +1213,15 @@ impl Drop for BoxedPrivate {
 pub(crate) fn release_resource(resource: BufferHandle) {
     let mut last_retry_error = None;
     loop {
-        match ax_gpu::with_gpu_for_cleanup(|gpu| gpu.release_buffer(resource)) {
+        let result = ax_gpu::with_gpu_for_cleanup(|gpu| gpu.release_buffer(resource));
+        // Cleanup may drain completions without leaving another device IRQ.
+        super::fence::on_gpu_completion();
+        match result {
             Ok(Ok(Completion::Complete)) => return,
             Ok(Ok(completion @ Completion::Pending(_))) => loop {
-                match ax_gpu::wait_completion(completion, ax_gpu::GPU_WAIT_TIMEOUT) {
+                let result = ax_gpu::wait_completion(completion, ax_gpu::GPU_WAIT_TIMEOUT);
+                super::fence::on_gpu_completion();
+                match result {
                     Ok(()) | Err(GpuError::DeviceLost) => return,
                     Err(GpuError::TimedOut) => continue,
                     Err(error) => {
