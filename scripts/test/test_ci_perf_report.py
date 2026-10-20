@@ -99,7 +99,8 @@ class PerformanceReportTests(unittest.TestCase):
                 "BLOCK_BENCH_RESULT op=read round=5 mib_s=123.4",
                 "LTP_NETSTRESS_RESULT case=tcp-rr median_ms=2",
                 'WAKEUP_LATENCY_RESULT {"case":"foo","policy":"other","p50_ns":9}',
-                "STARRY_IPERF3_BENCH_RESULT case=T01 direction=tx median_mbps=100.5",
+                "STARRY_NETWORK_BENCH_RESULT case=T01 direction=tx median_mbps=100.5",
+                "[test_output] STARRY_NETWORK_BENCH_RESULT case=T03 direction=rx median_mbps=90.25",
                 "uvc-fps: done avg_fps=30 avg_throughput_mib_s=4.5",
             ]
         )
@@ -117,9 +118,42 @@ class PerformanceReportTests(unittest.TestCase):
                 {"name": "block-io/read", "unit": "MiB/s", "value": 123.4},
                 {"name": "netstress/tcp-rr", "unit": "ms", "value": 2.0},
                 {"name": "wakeup/foo/other/p50", "unit": "ns", "value": 9.0},
-                {"name": "iperf3/T01/tx", "unit": "Mbps", "value": 100.5},
+                {"name": "network-throughput/T01/tx", "unit": "Mbps", "value": 100.5},
+                {"name": "network-throughput/T03/rx", "unit": "Mbps", "value": 90.25},
                 {"name": "uvc/avg_fps", "unit": "frames/s", "value": 30.0},
                 {"name": "uvc/avg_throughput_mib_s", "unit": "MiB/s", "value": 4.5},
+            ],
+        )
+
+    def test_block_rw_non_default_profile_is_part_of_metric_names(self):
+        log_text = "\n".join(
+            [
+                "block-rw-bench: io_model=buffered-file write_scope=write-syscalls "
+                "fsync=false request_bytes=512 max_transfer_bytes=512 "
+                "boundary_coverage=partial drop_caches=false "
+                "boundary=full-file-stack-not-raw-request-latency",
+                "block-rw-bench: case=sector write_mib_s=12.5 read_mib_s=8.5 elapsed_ms=100",
+            ]
+        )
+
+        self.assertEqual(
+            ci_perf_report.render_benchmarks(log_text),
+            [
+                {
+                    "name": "block-rw/sector/fsync-false-boundary-partial-request-512-max-transfer-512/write_mib_s",
+                    "unit": "MiB/s",
+                    "value": 12.5,
+                },
+                {
+                    "name": "block-rw/sector/fsync-false-boundary-partial-request-512-max-transfer-512/read_mib_s",
+                    "unit": "MiB/s",
+                    "value": 8.5,
+                },
+                {
+                    "name": "block-rw/sector/fsync-false-boundary-partial-request-512-max-transfer-512/elapsed",
+                    "unit": "ms",
+                    "value": 100.0,
+                },
             ],
         )
 

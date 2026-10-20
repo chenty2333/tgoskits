@@ -43,7 +43,10 @@ impl Pl011ConfigSnapshot {
 impl UartPort for Pl011 {
     fn startup(&mut self, config: &Config) -> Result<(), ConfigError> {
         let snapshot = Pl011ConfigSnapshot::capture(self.registers());
-        if let Err(error) = self.open().and_then(|()| self.set_config(config)) {
+        // `open` performs its fallible drain before touching any register, so a
+        // timeout must not trigger a snapshot rewrite on a busy, enabled UART.
+        self.open()?;
+        if let Err(error) = self.set_config_after_drain(config) {
             snapshot.restore(self.registers());
             return Err(error);
         }
@@ -57,33 +60,7 @@ impl UartPort for Pl011 {
     }
 
     fn set_config(&mut self, config: &Config) -> Result<(), ConfigError> {
-        let snapshot = Pl011ConfigSnapshot::capture(self.registers());
-        let result = (|| {
-            self.registers().uartcr.modify(UARTCR::UARTEN::CLEAR);
-            self.wait_until_not_busy()?;
-
-            self.registers().uartlcr_h.modify(UARTLCR_H::FEN::CLEAR);
-            if let Some(baudrate) = config.baudrate {
-                self.set_baudrate_internal(baudrate)?;
-            }
-            if let Some(data_bits) = config.data_bits {
-                self.set_data_bits_internal(data_bits)?;
-            }
-            if let Some(stop_bits) = config.stop_bits {
-                self.set_stop_bits_internal(stop_bits)?;
-            }
-            if let Some(parity) = config.parity {
-                self.set_parity_internal(parity)?;
-            }
-            self.registers().uartlcr_h.modify(UARTLCR_H::FEN::SET);
-            self.registers().uartcr.set(snapshot.cr);
-            Ok(())
-        })();
-
-        if result.is_err() {
-            snapshot.restore(self.registers());
-        }
-        result
+        self.set_config_with_wait_step(config, || {})
     }
 
     fn read_rx(&mut self) -> Option<RxSample> {
@@ -164,6 +141,50 @@ impl UartPort for Pl011 {
                 .set(enabled & !imsc_for_events(ready));
         }
         ready
+    }
+}
+
+impl Pl011 {
+    pub(super) fn set_config_with_wait_step(
+        &mut self,
+        config: &Config,
+        wait_step: impl FnMut(),
+    ) -> Result<(), ConfigError> {
+        // Let the enabled UART advance the original FIFO before changing any
+        // configuration register. A timeout here has no state to roll back.
+        self.wait_until_not_busy_with(wait_step)?;
+        self.set_config_after_drain(config)
+    }
+
+    fn set_config_after_drain(&mut self, config: &Config) -> Result<(), ConfigError> {
+        // From this point the transaction disables the UART and changes FIFO
+        // and line settings, so any configuration error restores the snapshot.
+        let snapshot = Pl011ConfigSnapshot::capture(self.registers());
+        let result = (|| {
+            self.registers().uartcr.modify(UARTCR::UARTEN::CLEAR);
+
+            self.registers().uartlcr_h.modify(UARTLCR_H::FEN::CLEAR);
+            if let Some(baudrate) = config.baudrate {
+                self.set_baudrate_internal(baudrate)?;
+            }
+            if let Some(data_bits) = config.data_bits {
+                self.set_data_bits_internal(data_bits)?;
+            }
+            if let Some(stop_bits) = config.stop_bits {
+                self.set_stop_bits_internal(stop_bits)?;
+            }
+            if let Some(parity) = config.parity {
+                self.set_parity_internal(parity)?;
+            }
+            self.registers().uartlcr_h.modify(UARTLCR_H::FEN::SET);
+            self.registers().uartcr.set(snapshot.cr);
+            Ok(())
+        })();
+
+        if result.is_err() {
+            snapshot.restore(self.registers());
+        }
+        result
     }
 }
 

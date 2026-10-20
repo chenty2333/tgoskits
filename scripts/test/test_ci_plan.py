@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import importlib.util
+import itertools
 import json
 import os
 import re
@@ -189,6 +190,74 @@ class CiPlanTests(unittest.TestCase):
             self.assertTrue(check["nightly_only"])
             self.assertFalse(check.get("performance_report", False))
 
+    def test_requires_mkimage_reaches_the_board_matrix_row(self):
+        # The disabled AKA-00 tennis YOLO benchmark was the only check that
+        # needed `mkimage`, so the manifest-to-matrix plumbing is covered with a
+        # fixture instead of a live registration.
+        context = ci_plan.PlanContext(
+            repository="rcore-os/tgoskits",
+            repository_owner="rcore-os",
+            event_name="schedule",
+        )
+
+        check = ci_plan._validate_check(
+            {
+                "id": "board-check",
+                "name": "Board check",
+                "group": "Starry Apps",
+                "command": "true",
+                "requires_mkimage": True,
+            },
+            "fixture:1",
+        )
+        # `load_catalog` attaches the owning manifest after validation, so the
+        # fixture check sets the same field before it is normalized into a row.
+        check["source"] = str(
+            ci_plan.BENCHMARK_MANIFEST.relative_to(ci_plan.WORKSPACE_ROOT)
+        )
+
+        row = ci_plan._normalize_check(check, context)
+
+        self.assertTrue(row["requires_mkimage"])
+
+    def test_disabled_tennis_yolo_benchmark_stays_out_of_the_plan(self):
+        disabled_id = "starry-performance-tennis-yolo-aka-00-sg2002"
+        checks = ci_plan.load_catalog((ci_plan.BENCHMARK_MANIFEST,))
+
+        self.assertNotIn(disabled_id, {check["id"] for check in checks})
+        self.assertNotIn(
+            "aka00-tennis-yolo",
+            {
+                case
+                for check in checks
+                for registration in check.get("suite", ())
+                for case in registration.get("cases", ())
+            },
+        )
+
+        context = ci_plan.PlanContext(
+            repository="rcore-os/tgoskits",
+            repository_owner="rcore-os",
+            event_name="schedule",
+        )
+        plan = ci_plan.build_benchmarks_plan(context)
+        board_rows = plan["starry_board_performance_matrix"]["include"]
+
+        self.assertTrue(board_rows)
+        self.assertNotIn(disabled_id, {row["id"] for row in board_rows})
+
+    def test_check_manifest_rejects_non_boolean_requires_mkimage(self):
+        with self.assertRaisesRegex(ci_plan.PlanError, "requires_mkimage"):
+            ci_plan._validate_check(
+                {
+                    "id": "board-check",
+                    "name": "Board check",
+                    "command": "true",
+                    "requires_mkimage": "true",
+                },
+                "fixture:1",
+            )
+
     def test_check_manifests_do_not_declare_removed_booleans(self):
         for manifest in sorted(ci_plan.CHECKS_ROOT.rglob("*.toml")):
             with self.subTest(manifest=manifest.name):
@@ -279,14 +348,14 @@ class CiPlanTests(unittest.TestCase):
             selections[0].template_id,
             "test-axvisor-aarch64-qemu-timer-stress",
         )
-        self.assertIn("--test-case gicv3-timer-stress", selections[0].command)
+        self.assertIn("axvisor app qemu", selections[0].command)
+        self.assertIn("--app qemu-timer-stress/gicv3-timer-stress", selections[0].command)
 
     def test_nightly_only_suite_changes_keep_static_checks_without_running_board(self):
         for path in (
             "apps/axvisor/normal/qemu-timer-stress/gicv3-timer-stress/qemu-aarch64.toml",
             "benchmarks/axvisor/board-orangepi-5-plus/ivc-benchmark/benchmark/board-orangepi-5-plus-ivc-benchmark.toml",
             "apps/axvisor/normal/board-orangepi-5-plus/pci-network/ping/board-orangepi-5-plus-linux.toml",
-            "apps/axvisor/normal/board-orangepi-5-plus/virtio-net-peer/smoke/board-orangepi-5-plus-virtio-net-peer.toml",
             "benchmarks/axvisor/board-orangepi-5-plus/vcpu-perf/performance/board-orangepi-5-plus-vcpu-perf.toml",
             "benchmarks/axvisor/board-orangepi-5-plus/task-switch/board-orangepi-5-plus-task-switch.toml",
             "benchmarks/starry/block-rw-bench/board-orangepi-5-plus.toml",
@@ -678,35 +747,53 @@ class CiPlanTests(unittest.TestCase):
         )
 
     def test_axvisor_board_build_change_groups_cases_by_build_config(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            suite_root = root / "test-suit/axvisor/normal/board-demo"
-            (suite_root / "smoke").mkdir(parents=True)
-            (suite_root / "ping").mkdir(parents=True)
-            build_config = suite_root / "build-aarch64-unknown-none-softfloat.toml"
-            build_config.write_text("target = 'aarch64-unknown-none-softfloat'\n")
-            (suite_root / "smoke/board-demo.toml").write_text("\n")
-            (suite_root / "ping/board-demo.toml").write_text("\n")
-            checks = [
-                {
-                    "id": "axvisor-board-demo",
-                    "name": "Board Demo · Suites",
-                    "suite": [{"kind": "axvisor-board", "board": "demo"}],
-                }
-            ]
-
-            selections = ci_plan.resolve_suite_selections(
-                root,
-                checks,
-                [build_config.relative_to(root).as_posix()],
-            )
-
-        self.assertEqual(len(selections), 1)
-        self.assertEqual(
-            selections[0].command,
-            "cargo xtask axvisor test board --test-group normal "
-            "--test-case ping,smoke --board demo",
+        suite_trees = (
+            "apps/axvisor/normal",
+            "test-suit/axvisor/normal",
+            "benchmarks/axvisor",
         )
+        for suite_tree, independent in itertools.product(suite_trees, (False, True)):
+            with (
+                self.subTest(suite_tree=suite_tree, independent=independent),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                root = Path(temp_dir)
+                suite_root = root / suite_tree / "board-demo"
+                (suite_root / "smoke").mkdir(parents=True)
+                (suite_root / "ping").mkdir(parents=True)
+                build_dir = suite_root / "ping" if independent else suite_root
+                build_config = build_dir / "build-aarch64-unknown-none-softfloat.toml"
+                build_config.write_text("target = 'aarch64-unknown-none-softfloat'\n")
+                (suite_root / "smoke/board-demo.toml").write_text("\n")
+                (suite_root / "ping/board-demo.toml").write_text("\n")
+                app_case = suite_tree.startswith("apps/")
+                selector = ("board-demo/ping" if independent else "board-demo/ping,board-demo/smoke") if app_case else ("board-demo/ping" if independent else "ping,smoke")
+                checks = [
+                    {
+                        "id": "axvisor-board-demo",
+                        "name": "Board Demo · Suites",
+                        "suite": [{
+                            "kind": "axvisor-board",
+                            "board": "demo",
+                            "cases": selector.split(","),
+                        }],
+                    }
+                ]
+
+                ci_plan.validate_suite_catalog(root, checks)
+                selections = ci_plan.resolve_suite_selections(
+                    root,
+                    checks,
+                    [build_config.relative_to(root).as_posix()],
+                )
+
+                self.assertEqual(len(selections), 1)
+                self.assertEqual(
+                    selections[0].command,
+                    ("cargo xtask axvisor app board --group normal --app " if app_case else
+                     "cargo xtask axvisor test board --test-group normal --test-case ")
+                    + f"{selector} --board demo",
+                )
 
     def test_generic_driver_suite_routes_source_and_rejects_missing_cases(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1085,11 +1172,15 @@ command = "true"
 
         benchmark = "/usr/bin/ivc-starry-bench"
         cmdline = vm_config["kernel"]["cmdline"]
-        # The board route waits for the default Starry init shell prompt, and
-        # StarryOS panics when init exits, so the VM must keep that shell as
-        # init and run the benchmark as its child.
+        # Avoid the rootfs systemd init: it cannot finish booting without
+        # kernel uevent netlink on this board.  Keep an interactive /bin/sh as
+        # PID 1 and run the benchmark from the guest shell as its child.
         self.assertNotIn(benchmark, cmdline)
-        self.assertNotIn("init=", cmdline)
+        self.assertIn("init=/bin/sh", cmdline)
+        self.assertIn(
+            '-- -c "cd /root; export PS1=$USER@$HOSTNAME:~#; exec /bin/sh -i"',
+            cmdline,
+        )
 
         steps = board_config["shell_check_steps"]
         attach_indices = [

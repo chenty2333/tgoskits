@@ -1,5 +1,26 @@
 # 启动调试参考
 
+## StarryNixOS 块根初始化入口
+
+`apps/starry/nixos/flake.nix` 的 `mkRootfs` 生成 `/init` 链接；块根默认候选
+不包含该路径，NixOS 的 `qemu-x86_64.toml` 必须通过 `cmdline = "init=/init"`
+显式选择它。普通应用由 `ostool` 在 ESP 写入 `EFI/BOOT/cmdline.txt`，
+独立 `nixos-tests/starryos/launch-vm.py::prepare_launch_plan()` 也从共享配置
+读取该字段并写入自己的 ESP；`someboot::efi_stub::load_efi_payload()` 在没有
+UEFI load options 时读取该文件。排查候选入口 panic 时先检查实际 ESP
+及 `init_options()` 收到的参数，不给所有块根添加 NixOS 专用默认路径。
+验收仍须获得 pid1、activation、systemd、marker 与
+`STARRY_NIXOS_SYSTEM_PASSED` 的完整有序证据；ESP 准备测试不能替代真实启动。
+
+宿主没有 Nix 时，先检查 `.github/ci/checks/starry-apps.toml` 中
+`starry-nixos-x86-64-qemu` 的容器入口。该检查通过 `nixos/nix:2.33.1`
+与 `nix develop --accept-flake-config -c` 提供固定开发环境，运行
+`cargo xtask starry app qemu -t nixos --arch x86_64 --cap nix`；
+不要仅因宿主缺少 Nix 就认定无法执行验收。
+复用已有工作区时，为容器指定独立的 `CARGO_TARGET_DIR`。宿主构建脚本
+可能依赖 `/lib64/ld-linux-x86-64.so.2`；在 Nix 容器中复用这些产物会报
+文件存在却无法执行的 `No such file or directory`。
+
 ## axloader x86_64 UEFI OTA 与恢复
 
 迁移后的可移动介质启动路径固定是 `EFI/BOOT/BOOTX64.EFI` 小型启动器；
@@ -88,24 +109,28 @@ AArch64 宿主替换中，把不可变固件计划中的每个 GICR 区域和步
 
 ## Axvisor 板卡资源与磁盘根
 
-`prepare_guest_payload()` 将构建机存在的镜像复制进宿主 initramfs；板卡磁盘提供的绝对路径保留到 `install_builtin()`，在准备好的磁盘根中校验后才发布配置、提交切根。准备阶段包含附加分区，提交时递归绑定整个已校验的挂载树。OrangePi 普通 Linux CI 使用 `AXVISOR_GUEST_ASSETS=/guest`；ROC 使用 `AXVISOR_GUEST_ASSETS=/userdata/rootfs_overlay/guest`，镜像位于单独的 `/userdata` 分区。缺失的环境变量会展开为空字符串，不能让它把板卡路径变成 `/linux/...`。定制 BSP 打包仍可把该变量指向构建机资源目录。
+`prepare_guest_payload()` 将构建机存在的镜像复制进宿主 initramfs；板卡磁盘提供的绝对路径保留到 `install_builtin()`，在准备好的磁盘根中校验后才发布配置、提交切根。准备阶段包含附加分区，提交时递归绑定整个已校验的挂载树。OrangePi 普通 Linux CI 直接使用板端绝对路径 `/guest/linux/orangepi-5-plus` 与 `/guest/rootfs-aarch64-orangepi-jammy-0.img`，不需要 `AXVISOR_GUEST_ASSETS`；ROC 使用 `AXVISOR_GUEST_ASSETS=/userdata/rootfs_overlay/guest`，镜像位于单独的 `/userdata` 分区。缺失的环境变量会展开为空字符串，不能让它把板卡路径变成 `/linux/...`。定制 BSP 打包仍可把该变量指向构建机资源目录。
 
 ROC 部署固件会在交接时追加自身控制 DTB 的参数，控制 DTB 中的 `ro` 会覆盖普通 `bootargs` 中较早的 `rw`；只修改 FIT 内 DTB 不能消除该参数。用例通过 `BootPayloadConfig.cmdline` 显式指定磁盘根及 `rw`，并在本次启动的 U-Boot 命令中执行 `fdt addr ${fdtcontroladdr}`、`fdt set /chosen bootargs rw`，覆盖内存中的控制 DTB 参数。该流程使用发布版 ostool `0.30.3`。不要保存环境变量或写入固件，也不要改变内核对最后一个 `ro` 或 `rw` 生效的规则；磁盘根确实只读时必须拒绝安装和切根。
 
 ## OrangePi-5-Plus Linux 网卡直通
 
 物理网卡用例位于 `apps/axvisor/normal/board-orangepi-5-plus/pci-network`。
-它使用板卡 `/guest` 已部署的 `linux/orangepi-5-plus-6.1.99` 内核与 `linux/initramfs.cpio`
-（与 `/boot/Image` 同一 Linux 6.1.99 构建），
-并使用匹配客户机根文件系统中的 `r8125`
-模块；旧 `/guest/linux/orangepi-5-plus` 的 6.1.43 映像在相同设备树下出现 PCIe
-链路训练失败。网线连接 `fe180000.pcie` 下的 RTL8125，客户机接口为 `enP3p49s0`，
+`linux.toml` 使用板卡已部署的 `/guest/linux/orangepi-5-plus` 内核，要求 Rockchip BSP
+版本 `6.1.99-rockchip-rk3588`；无版本号的路径不代表可以使用任意内核。
+客户机通过 virtio-blk 挂载独立的 `/guest/rootfs-aarch64-orangepi-jammy-0.img`
+作为 ext4 根盘，不再使用 `linux/initramfs.cpio`。根盘中的 `r8125` 模块必须与内核
+版本一致，构建、部署及 SHA256 核对步骤见
+[PCIe 网卡应用说明](../../../../apps/axvisor/normal/board-orangepi-5-plus/pci-network/README.md)。
+网线连接直通 RTL8125，用例按 PCI ID `10ec:8125` 和 carrier 选择接口，不依赖固定接口名，
 目标为板卡网络中的 `192.168.1.2`。用例显式选择 PCIe 控制器，并保留 `aliases`、
 GPIO、SCMI、IOC、PHP GRF 和 PHY GRF 依赖。`pci=nomsi` 明确验证物理 INTx 级联；
 这条证据不代表物理 MSI/ITS 直通已经实现。
 
-通过 `cargo xtask axvisor test board -g normal -c ping --board orangepi-5-plus-linux -b OrangePi-5-Plus`
-运行该用例。测试先核验 PCI 身份 `10ec:8125`，再通过该接口向 `192.168.1.2`
+通过 `cargo xtask axvisor app board -g normal -t board-orangepi-5-plus/pci-network/ping --board orangepi-5-plus-linux -b BallPick-Robot-Rk3588`
+运行该用例，并按环境添加 `--server`、`--port`。`--board` 选择运行配置，`-b` 指定
+板卡服务登记的物理类型，可通过 `ostool board ls` 核对。测试先校验
+`uname -r` 为 `6.1.99-rockchip-rk3588`，再核验 PCI 身份 `10ec:8125`，通过该接口向 `192.168.1.2`
 发送五个 ICMP 请求，只有在截止时间内收到全部回复才报告成功。
 
 `boot::fdt::core::enrich_guest_config` 必须先执行 `parse_vm_interrupt`，再执行
