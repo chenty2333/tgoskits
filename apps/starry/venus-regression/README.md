@@ -40,3 +40,7 @@ CI 边界：仓库 `container/Dockerfile` 已选用 QEMU 11.1.1，但普通容�
 也未构建图形渲染依赖，因此普通 `starry app qemu --all` 跳过此应用，不构成 Venus
 已验证。图形运行器必须提供 KVM、宿主渲染栈并显式传入 `--cap virgl`；版本不满足时
 预构建直接失败，不降级到旧 QEMU 参数或关闭反馈。普通四架构 2D/system 门禁不变。
+
+当前 LTP `ltp-syscalls` 用例集没有 DRM/VirtGPU EXECBUF 覆盖，普通 2D system QEMU 的
+`supports_3d` 为 false，无法进入这条等待路径；因此用例保留在现有唯一声明 `virgl`
+能力的应用入口，没有新增不可达的 LTP 或 system 子用例。

@@ -75,12 +75,12 @@ struct concurrent_client {
     pthread_barrier_t *start;
 };
 
-static void *set_caps(void *opaque)
+static void *toggle_universal_planes(void *opaque)
 {
     struct concurrent_client *client = opaque;
     pthread_barrier_wait(client->start);
     for (unsigned i = 0; i < 64; ++i) {
-        struct drm_set_client_cap cap = { .capability = DRM_CLIENT_CAP_ATOMIC,
+        struct drm_set_client_cap cap = { .capability = DRM_CLIENT_CAP_UNIVERSAL_PLANES,
                                           .value = i & 1 };
         if (syscall(SYS_ioctl, client->fd, DRM_IOCTL_SET_CLIENT_CAP, &cap) != 0)
             client->errors++;
@@ -211,14 +211,15 @@ int main(void)
     CHECK_RET(ioctl(fd, DRM_IOCTL_SET_CLIENT_CAP, &scc), 0,
               "SET_CLIENT_CAP ATOMIC");
 
-    /* Both workers use aliases of the same open-file description. This is a
-     * real SMP dispatch check; the core's atomic types supply the race proof. */
+    /* Both workers use aliases of the same open-file description. The writer
+     * toggles the same universal_planes field that GETPLANERESOURCES reads;
+     * the core's atomic type supplies the race proof. */
     pthread_barrier_t start;
     pthread_t writer, reader;
     struct concurrent_client writing = { .fd = fd, .start = &start };
     struct concurrent_client reading = { .fd = dup(fd), .start = &start };
     CHECK_RET(pthread_barrier_init(&start, NULL, 2), 0, "create shared-fd barrier");
-    int writer_ret = pthread_create(&writer, NULL, set_caps, &writing);
+    int writer_ret = pthread_create(&writer, NULL, toggle_universal_planes, &writing);
     CHECK_RET(writer_ret, 0, "start shared-fd capability writer");
     int reader_ret = pthread_create(&reader, NULL, query_planes, &reading);
     CHECK_RET(reader_ret, 0, "start shared-fd plane reader");

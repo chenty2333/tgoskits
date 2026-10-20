@@ -1223,6 +1223,34 @@ mod tests {
         drm_vblank_types::DrmPendingVblankEvent,
     };
 
+    #[test]
+    fn open_authentication_follows_capability() {
+        crate::test_support::init_runtime();
+        // SAFETY: The fixture supplies a valid mock device and allocates each file with
+        // the test task policy installed; both files are released before the device.
+        unsafe {
+            let driver: DrmDriver = core::mem::zeroed();
+            let dev = drm_dev_alloc(&driver, core::ptr::null_mut());
+            assert!(!dev.is_null());
+
+            let unprivileged = crate::test_support::with_task_policy(false, false, || {
+                drm_file_alloc((*dev).primary)
+            });
+            assert!(!unprivileged.is_null());
+            assert!(!(*unprivileged).authenticated.load(Ordering::Relaxed));
+            drm_file_free(unprivileged);
+
+            let privileged = crate::test_support::with_task_policy(true, false, || {
+                drm_file_alloc((*dev).primary)
+            });
+            assert!(!privileged.is_null());
+            assert!((*privileged).authenticated.load(Ordering::Relaxed));
+            drm_file_free(privileged);
+
+            drm_dev_put(dev);
+        }
+    }
+
     /// # Safety
     /// `completion` must point to a live `Completion` instance.
     unsafe extern "C" fn assert_completion_signaled_before_release(completion: *mut Completion) {

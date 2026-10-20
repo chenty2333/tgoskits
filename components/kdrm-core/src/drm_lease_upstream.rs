@@ -473,11 +473,13 @@ unsafe fn validate_lease_objects(count: usize, objects: *const *mut DrmModeObjec
 /// checks object type constraints, and records the IDs into `leases`.
 ///
 /// # Safety
-/// `dev`, `lessor_priv`, and `leases` must be valid pointers. `object_ids` must point to
-/// `object_count` valid `u32` entries.
+/// `dev`, `lessor_priv`, `lessor`, and `leases` must be valid pointers. `lessor` must be the
+/// referenced master returned by `drm_file_get_master(lessor_priv)` and stay live for this
+/// call. `object_ids` must point to `object_count` valid `u32` entries.
 unsafe fn populate_lease_set(
     dev: *mut DrmDevice,
     lessor_priv: *mut DrmFile,
+    lessor: *mut DrmMaster,
     leases: *mut Idr,
     object_count: usize,
     object_ids: *const u32,
@@ -487,8 +489,6 @@ unsafe fn populate_lease_set(
 
     // SAFETY: Resolves each requested object ID, enforces lease rules, and populates `leases`.
     unsafe {
-        let master = (*lessor_priv).master;
-
         for idx in 0..object_count {
             let obj_id = *object_ids.add(idx);
             let obj = drm_mode_object_find(dev, lessor_priv, obj_id, 0);
@@ -499,8 +499,11 @@ unsafe fn populate_lease_set(
                 return -ENOENT;
             }
 
-            if !master_holds_object(master, obj_id as i32)
-                || is_object_already_leased(master, obj_id as i32)
+            // Use the caller's referenced master instead of re-reading
+            // `(*lessor_priv).master`, which can change under SET_MASTER or
+            // DROP_MASTER and would be an unsynchronized read here.
+            if !master_holds_object(lessor, obj_id as i32)
+                || is_object_already_leased(lessor, obj_id as i32)
             {
                 drm_mode_object_put(obj);
                 for &held in &resolved_objects {
@@ -610,6 +613,7 @@ pub unsafe extern "C" fn drm_mode_create_lease_ioctl(
             let pop_res = populate_lease_set(
                 dev,
                 lessor_priv,
+                lessor,
                 core::ptr::addr_of_mut!(leases),
                 object_count,
                 id_buf,
