@@ -203,3 +203,6 @@ pub const fn default_task_stack_size() -> usize {
 mod tests;
 
 mod allocation;
+
+#[cfg(not(any(test, feature = "host-test")))]
+pub(crate) use resources::snapshot_current_execution;

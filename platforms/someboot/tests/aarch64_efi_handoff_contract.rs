@@ -16,6 +16,7 @@ const TARGET: &str = "aarch64-unknown-none-softfloat";
 const EFI_ENTRY: &str = "<someboot::arch::Arch as someboot::ArchTrait>::efi_enter_kernel";
 const EFI_CONTINUATION: &str = "someboot::arch::entry::enter_with_boot_state";
 const SETUP_SERVICE: &str = "someboot::efi_stub::setup_service";
+const FDT_ADDR: &str = "someboot::fdt::FDT_ADDR";
 
 #[test]
 fn aarch64_efi_handoff_preserves_firmware_state() {
@@ -23,7 +24,7 @@ fn aarch64_efi_handoff_preserves_firmware_state() {
     let archive = build_aarch64_efi_archive(temporary_directory.path());
     let disassembly = run_output(
         Command::new("rust-objdump")
-            .args(["-dr", "-C"])
+            .args(["-drt", "-C"])
             .arg(&archive),
         "disassemble the AArch64 EFI someboot archive",
     );
@@ -31,6 +32,17 @@ fn aarch64_efi_handoff_preserves_firmware_state() {
         disassembly.contains("file format elf64-littleaarch64"),
         "the contract must inspect an AArch64 target artifact"
     );
+    // LLVM may relocate against the containing section instead of the static
+    // symbol. Its section name retains the mangled Rust name even with -C.
+    // Resolve that alias from this artifact's symbol table before inspecting
+    // both entry paths, so neither spelling can hide a firmware-state reset.
+    let fdt_section = disassembly
+        .lines()
+        .filter(|line| line.ends_with(FDT_ADDR))
+        .flat_map(str::split_whitespace)
+        .find(|field| field.starts_with(".bss."))
+        .expect("the FDT static must have its own BSS section");
+    let disassembly = disassembly.replace(fdt_section, FDT_ADDR);
 
     let efi_entry = function_disassembly(&disassembly, EFI_ENTRY);
     assert_symbol_order(efi_entry, SETUP_SERVICE, EFI_CONTINUATION);
@@ -51,12 +63,7 @@ fn aarch64_efi_handoff_preserves_firmware_state() {
     assert_symbol_order(setup_service, "find_fdt", "find_acpi_rsdp");
 
     let direct_entry = function_disassembly(&disassembly, "kernel_entry");
-    for required in [
-        "__bss_start",
-        "__bss_stop",
-        "someboot::fdt::FDT_ADDR",
-        EFI_CONTINUATION,
-    ] {
+    for required in ["__bss_start", "__bss_stop", FDT_ADDR, EFI_CONTINUATION] {
         assert!(
             direct_entry.contains(required),
             "the direct-boot entry must retain its {required} initialization:\n{direct_entry}"
@@ -93,17 +100,23 @@ fn build_aarch64_efi_archive(target_directory: &Path) -> PathBuf {
         "compile someboot for AArch64 EFI",
     );
 
-    let dependency_directory = target_directory.join(TARGET).join("debug").join("deps");
-    let mut archives = fs::read_dir(&dependency_directory)
-        .expect("AArch64 dependency directory must be readable")
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.file_name()
+    let mut directories = vec![target_directory.to_path_buf()];
+    let mut archives = Vec::new();
+    while let Some(directory) = directories.pop() {
+        for entry in fs::read_dir(directory).expect("read isolated AArch64 build directory") {
+            let entry = entry.expect("read an AArch64 archive directory entry");
+            let path = entry.path();
+            if entry.file_type().expect("read archive file type").is_dir() {
+                directories.push(path);
+            } else if path
+                .file_name()
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| name.starts_with("libsomeboot-") && name.ends_with(".rlib"))
-        })
-        .collect::<Vec<_>>();
+            {
+                archives.push(path);
+            }
+        }
+    }
     assert_eq!(
         archives.len(),
         1,
@@ -126,7 +139,7 @@ fn assert_symbol_order(disassembly: &str, first: &str, second: &str) {
 }
 
 fn assert_no_firmware_state_reset(disassembly: &str, path: &str) {
-    for forbidden in ["__bss_start", "__bss_stop", "someboot::fdt::FDT_ADDR"] {
+    for forbidden in ["__bss_start", "__bss_stop", FDT_ADDR] {
         assert!(
             !disassembly.contains(forbidden),
             "{path} must preserve EFI-populated state instead of referencing \

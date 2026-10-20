@@ -8,9 +8,12 @@ use heapless::Vec;
 use someboot::ArchTrait;
 use somehal::mem::MemoryType;
 
-static RAM_LIST: OnceLock<Vec<RawRange, 33>> = OnceLock::new();
-static RESERVED_LIST: OnceLock<Vec<RawRange, 32>> = OnceLock::new();
-static MMIO_LIST: OnceLock<Vec<RawRange, 16>> = OnceLock::new();
+// Resource/live-object clipping can create more fragments than a firmware-only
+// map. Every platform list must accept the complete inherited map budget.
+const MAX_BOOT_REGIONS: usize = someboot::handoff::protocol::MAX_REGIONS;
+static RAM_LIST: OnceLock<Vec<RawRange, MAX_BOOT_REGIONS>> = OnceLock::new();
+static RESERVED_LIST: OnceLock<Vec<RawRange, MAX_BOOT_REGIONS>> = OnceLock::new();
+static MMIO_LIST: OnceLock<Vec<RawRange, MAX_BOOT_REGIONS>> = OnceLock::new();
 static VIRTUAL_ADDRESS_SPACE: OnceLock<
     Result<VirtualAddressSpaceLayout, VirtualAddressSpaceError>,
 > = OnceLock::new();
@@ -137,7 +140,11 @@ impl MemIf for MemIfImpl {
             for r in somehal::mem::memory_map() {
                 if matches!(
                     r.memory_type,
-                    MemoryType::Reserved | MemoryType::KImage | MemoryType::PerCpuData
+                    MemoryType::Reserved
+                        | MemoryType::KImage
+                        | MemoryType::PerCpuData
+                        | MemoryType::BootData
+                        | MemoryType::BootReclaimable
                 ) {
                     push_non_overlapping(&mut list, (r.physical_start, r.size_in_bytes));
                 }
@@ -147,8 +154,10 @@ impl MemIf for MemIfImpl {
                 push_non_overlapping(&mut list, range);
             }
             #[cfg(target_arch = "loongarch64")]
-            for &range in LOONGARCH_RESERVED_RAM_RANGES {
-                push_non_overlapping(&mut list, range);
+            if !someboot::handoff::takeover_completed() {
+                for &range in LOONGARCH_RESERVED_RAM_RANGES {
+                    push_non_overlapping(&mut list, range);
+                }
             }
             list
         })

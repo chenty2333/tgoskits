@@ -5,7 +5,7 @@ sidebar_label: "Axloader"
 
 # Axloader
 
-`cargo xtask axloader` 负责构建 x86_64 UEFI 装载器，并在本地 OVMF/QEMU 中验证设备 HTTP 启动、可选 cmdline/initramfs 和 A/B OTA。axloader 启动后是 TCP4 HTTP 服务端；直连工具与 ostool-server 都调用同一组设备接口。串口在启动前输出本次 `serial_id` 身份帧和诊断，绑定完成或交接后才交给目标系统，测试不会向串口注入控制命令。
+`cargo xtask axloader` 负责构建 x86_64 UEFI 装载器；LoongArch EFI 前端通过 `cargo xtask arceos` 使用 axstd 构建。两条路径都提供设备 HTTP 启动、可选 cmdline/initramfs 和 A/B OTA。axloader 启动后是 TCP4 HTTP 服务端；直连工具与 ostool-server 都调用同一组设备接口。x86 固件路径和 LoongArch axstd 路径都提供串口身份帧，后者在 ArceOS 激活 runtime UART 时通过 axstd console 报告实际波特率和 8N1 参数；没有活动 UART 时继续 fail-closed 并要求显式 `direct` continue。
 
 ## 1. 构建入口
 
@@ -39,6 +39,89 @@ cargo xtask axloader test qemu --target x86_64-unknown-uefi
 | `axloader.efi` | `EFI/AXLOADER/A.EFI` 或 `B.EFI` | 广播设备、提供 HTTP 启动和 OTA 接口、交接目标内核 |
 
 `axloader::ota::State` 保存稳定槽、待试槽、摘要、升级 ID、来源和结果；`axloader::ota::OtaDisk` 负责 `STATE0.BIN`、`STATE1.BIN` 与槽文件的 Flush 和读回校验。两份状态都损坏或没有可信槽时，启动器停止并要求外部介质恢复。
+
+### 1.3 LoongArch EFI 构建
+
+LoongArch 目标使用 `loongarch64-unknown-none-softfloat` 和 `arceos-efi`，由
+`bootloader/axloader/build-loongarch64-unknown-none-softfloat.toml` 选择
+axstd、FAT/NVMe 和 `efi-handoff` 能力，再由
+`bootloader/axloader/qemu-loongarch64.toml` 配置 `virt`、virtio-net、NVMe/FAT
+磁盘、`uefi = true` 和 `to_bin = true`。`axstd_loader::run()` 负责单任务轮询
+发现和 HTTP 路由；`TargetSpec::LOONGARCH64_EFI` 固定 ELF machine
+`EM_LOONGARCH` 与 `efi_pe_entry`。someboot 公共 `boot_resources` 管理类型化资源，
+`handoff::HandoffSpec` 和 `PreparedHandoff` 管理两条平台路径的交接事务；x86_64
+继续使用 EFI LoadOptions 与 Linux EFI LoadFile2。
+
+`boot-resources` 可以独立使用；`efi-handoff = ["efi", "boot-resources"]` 开启生产端，
+普通 EFI 消费始终跟随构建脚本的 `cfg(efi)`。原生 UEFI target 只编译 someboot
+公共能力与固件适配，不带入内核入口、分页或 SMP。LoongArch 的 v4 配置表承载资源
+快照、镜像、cmdline/initramfs 和应用元数据，不包含固定三池或 OTA 槽位字段；
+GUID 为 `7b9fa931-a25b-d043-b13c-63435428c473`。v2/v3 已拒绝，迁移须同时重建
+生产者、目标与 A/B 槽。完整边界见[设计文档](../../design/someboot-boot-resources.md)。
+
+`axstd_loader::run()` 在启动及每次连接处理后发送 UDP 公告，阻塞等待连接期间
+不周期重发。依赖公告发现的服务端须先就绪；服务端后启动或启动广播丢失时，
+使用已知设备 IP 直接访问 HTTP 接口。
+
+两前端使用 `http_control::Route` 共享 epoch/trial 准入，三种 GET 状态查询无需
+epoch，单值控制头重复时返回 `400`。`elf::ElfImage` 统一解析和校验可执行 EFI
+入口，具体装载地址、内存申请和缓存维护由后端负责。LoongArch 在最终跳转前
+通过 `ax-runtime::handoff::enter()` 同步文件系统、停止块设备与网络 DMA、join
+网络任务、关闭串口及本核中断；当前限定一个运行处理器。停稳失败或保持调用方
+执行上下文的 EFI 目标返回时复位；已接管栈、MMU 或处理器状态的内核不得返回。
+
+```bash
+cargo xtask arceos build \
+  --package axloader \
+  --config bootloader/axloader/build-loongarch64-unknown-none-softfloat.toml
+cargo xtask arceos qemu \
+  --package axloader \
+  --config bootloader/axloader/build-loongarch64-unknown-none-softfloat.toml \
+  --qemu-config bootloader/axloader/qemu-loongarch64.toml
+```
+
+要验证目标 ELF 的正向交接，先构建独立的 ArceOS EFI 应用并打包宿主归档：
+
+```bash
+cargo xtask image pack-initramfs test-suit/host-initramfs \
+  target/axbuild/host-initramfs/loong-host.cpio
+cargo xtask arceos build \
+  --package arceos-helloworld \
+  --config bootloader/axloader/build-loongarch64-helloworld-efi.toml
+```
+
+该配置启用 `loong-efi-smoke`，使用 `loongarch64-unknown-none-softfloat`、
+`ax-std/efi`、cmdline/initramfs smoke 特性，生成
+`target/loongarch64-unknown-linux-musl/release/arceos-helloworld`。目标应用的
+输出用于确认 EFI 入口已经完成 cmdline 和宿主 initramfs 交接。
+
+完整 LoongArch 回归由以下入口统一构建并运行，不需要手动保留后台 QEMU：
+
+```bash
+python3 bootloader/axloader/scripts/loong-qemu-smoke.py
+```
+
+脚本先执行 `boot-resources` 独立资源应用，再根据 `qemu-loongarch64-http.toml`
+创建独占 FAT、QMP socket 和空闲宿主端口，运行正常 HTTP/OTA/ELF 与 FAT 写满两组
+场景。loader 构建配置中的 `to_bin = true` 让 `arceos build` 在准备 FAT 前生成
+EFI `.bin`。失败时输出 QEMU 日志并停止自己创建的进程组。可加
+`--output-dir /tmp/loong-efi` 保留本次运行证据。需要 QEMU LoongArch、dosfstools、
+mtools 和 `python3`。
+
+LoongArch 的持久文件位于 FAT 卷的 `axloader/` 目录：`A.EFI`、`B.EFI`、
+`STATE0.BIN` 和 `STATE1.BIN`。`LaOta::prepare_bootstrap()` 在进入待试槽前提交
+`attempted`；`ota::handoff` 编解码应用自己的槽位和代次，someboot 仅传递有界
+元数据。确认由 `LaOta::confirm()` 按升级 ID 和来源提交。没有可信启动熵时先提交
+持久代次，再派生 `boot_epoch`；继承入口复用父 loader 已提交的代次。
+
+axloader 的静态计划声明 32 MiB 镜像区（`0x200000`）、256 MiB 归档区、32 MiB
+EFI 槽执行区和 32 MiB 原文件区。首次启动在退出服务前通过
+`InitialContents::FirmwareBootImage` 保存最初固件启动文件，再校验、Flush 并读回
+`A.EFI`，最后创建状态记录；不使用已修改的运行镜像字节。该配置要求最初从可读的
+EFI 文件系统启动，源文件不超过 32 MiB，来源不可用或必需资源申请失败时停止。
+仅接受 `ImageBase = 0`、无 base relocation directory 的 someboot LoongArch PE。
+继承阶段保留同一份固件来源文件，当前槽身份以持久状态为准，缺失状态时拒绝建档。
+非 EFI LoongArch、UHI FDT handoff 和 AArch64 EFI 镜像生成不在本阶段。
 
 ## 2. 设备控制
 
@@ -77,7 +160,13 @@ sequenceDiagram
 | `DELETE /api/v1/boot/jobs/{id}` | 取消尚未执行的事务 |
 | `POST /api/v1/boot/jobs/{id}/start` | 完成 ELF 与载荷检查，核对 `X-Serial-Binding`，回复 `202`，关闭网络对象后交接 |
 
-v6 只接受 `__x86_64_efi_pe_entry`。cmdline 经 `entry::PreparedLoadOptions` 编码为带 NUL 的 UCS-2 EFI LoadOptions；initramfs 存在时由 `payload::PreparedPayload` 注册 Linux EFI `EFI_LOAD_FILE2_PROTOCOL` 提供者。启动文件单个上限 256 MiB，请求头上限 4 KiB，只接受定长 body。上传、状态查询和 OTA 不受串口门禁限制；没有隧道需求的调用方必须显式使用 `direct` continue。
+x86_64 v6 只接受 `__x86_64_efi_pe_entry`。`someboot::handoff::PreparedHandoff` 在内部将 cmdline 编码为带 NUL 的 UCS-2 EFI LoadOptions，并为可选 initramfs 注册 Linux EFI `EFI_LOAD_FILE2_PROTOCOL` 提供者。启动文件单个上限 256 MiB，请求头上限 4 KiB，只接受定长 body。上传、状态查询和 OTA 不受串口门禁限制；没有隧道需求的调用方必须显式使用 `direct` continue。
+
+LoongArch 请求使用 `BootArch::Loongarch64`、`ImageFormat::Elf64` 和
+`efi_pe_entry`。`axstd_loader::LoadedElf` 拒绝错误 machine、入口、重叠
+`PT_LOAD` 或与当前 loader 重叠的装载区域；`PublishedPayload` 通过
+共同的 `HandoffSpec`/`PreparedHandoff` 交接 cmdline/initramfs。目标 EFI
+镜像由 `LoadedPe` 校验 LoongArch PE/COFF machine 并从独立槽位内存池装载。
 
 v6 设备必须与支持 `POST /api/v1/serial/continue`、`X-Serial-Binding` 的 ostool-server
 配套，板卡 ESP/U 盘中的 `axloader.efi` 也要更新到同一版本。启动返回
@@ -126,12 +215,13 @@ QEMU 验证使用真实 FAT 磁盘、OVMF VARS 和 SLiRP `hostfwd`。`scripts/ax
 
 1. 执行 `cargo test -p axloader --all-targets`。
 2. 检查 `axloader` 的 `x86_64-unknown-uefi` 目标。
-3. release 构建启动器、装载器和真实 ArceOS UEFI ELF。
+3. release 构建启动器、装载器及 ArceOS、StarryOS、AxVisor 的真实 EFI 入口 ELF；由现有镜像存储和 AxVisor 归档流水线准备 BusyBox、Linux 及客体配置。
 4. 把启动器、A/B 槽和双状态记录写入真实 FAT 镜像。
 5. 用 `hostfwd` 调用客户机 TCP `2999`，先读取状态并完成 `bound/direct` continue，再覆盖直连启动、OTA、重启确认和回滚。
 6. 在五种可选载荷组合中观察启动后的内核输出。
+7. 上传 StarryOS 和 AxVisor 的 ELF 与归档，分别运行 StarryOS 用户态及 AxVisor 的 Linux 客体用户态。
 
-该流程不会安装 systemd 服务，不会修改 runner、板卡配置或实体设备。宿主需要 `qemu-system-x86_64`、KVM、`mkfs.vfat`、`mcopy`、`mmd` 和 `python3`。
+该流程不会安装 systemd 服务，不会修改 runner、板卡配置或实体设备。宿主需要 `qemu-system-x86_64`、KVM、`mkfs.vfat`、`mcopy`、`mmd` 和 `python3`。AxVisor 用例使用 2 GiB、2 vCPU 和 `host,-la57`，要求宿主暴露嵌套 VMX/SVM。
 
 ### 3.2 成功判据
 
@@ -141,9 +231,25 @@ QEMU 验证使用真实 FAT 磁盘、OVMF VARS 和 SLiRP `hostfwd`。`scripts/ax
 - cmdline 场景输出精确的 `HOST_CMDLINE`。
 - initramfs 场景输出 `HOST_INITRAMFS_PASSED`。
 - initramfs 回退场景验证 ESP 上的 Linux EFI initrd provider。
+- StarryOS 必须运行归档中的 shell 脚本，检查 cmdline 参数并完成文件写读，输出完整行 `STARRY_AXLOADER_USERSPACE_PASSED`。
+- AxVisor 必须消费宿主归档中的 builtin 配置和 Linux 镜像，按宿主参数 `axvisor.vm_start=1` 启动客体；测试等待管理 shell 后执行 `vm console 1`，客体脚本完成同样检查后输出完整行 `AXVISOR_GUEST_AXLOADER_USERSPACE_PASSED`。
 - OTA 场景跨 QEMU 启动验证坏摘要、短请求、未确认复位回滚、确认持久化和再次启动。
 
-QEMU 提前退出或超时时保留 transcript。测试应根据具体失败阶段报告 HTTP、网络、磁盘或内核交接错误，不能用重试掩盖确定性失败。
+`ota_qemu::payloads::OsPayloads` 只负责准备 OS 载荷，复用 `boot_smoke()` 的真实 HTTP 上传、校验和串口门禁。构建在 `AXBUILD_NO_SNAPSHOT=1` 子进程中调用现有 `cargo xtask starry/axvisor build`，前后逐字节核对保存的命令快照，保留用户默认选择；不修改多线程父进程的全局环境。成功行不出现在 cmdline 原文中，命令行回显不能替代实际执行。每次运行在 `target/axbuild/axloader/qemu/x86-*` 保留 ESP、VARS、历次串口和 stderr；提前退出或超时也保留。测试应根据具体失败阶段报告 HTTP、网络、磁盘或内核交接错误，不能用重试掩盖确定性失败。
+
+LoongArch CI 使用 `scripts/loong-qemu-smoke.py`。资源用例不启用网络、OTA 或
+交接生产端，以 `BOOT_RESOURCES_PASSED` 和 `Hello, world!` 作为实际执行证据。
+HTTP 用例验证 manifest 幂等、serial continue、坏 ELF/OTA 拒绝、有效 PE 槽位写入，
+未确认 trial 经 QMP 复位回滚到原稳定摘要、旧确认拒绝，以及再次 trial/confirm 和再次复位后的稳定摘要。
+独立 `arceos-helloworld` EFI ELF 与宿主归档通过 HTTP 上传，目标必须输出
+`HOST_CMDLINE: axloader-positive=1`、`HOST_INITRAMFS_PASSED` 和 `Hello, world!`。
+写满的独占 FAT 则验证 `409 ota_storage_failed` 且稳定状态未提交；错误镜像仍为
+`422 image_digest_or_efi_validation_failed`。`ready_to_handoff` 单独出现只表示准备交接。
+
+普通 `qemu-loongarch64.toml` 仅等待 `network_ready: arch=loongarch64` 和
+`loader_server: port=2999`。LoongArch 在活动 runtime UART 未绑定时输出身份帧，
+状态与 UDP 公告报告实际波特率和 8N1 参数；无活动 UART 时报告 `ready=false`，
+客户端须显式 `direct` continue。绑定后暂停身份帧，撤销绑定后恢复。
 
 ## 4. 故障定位
 
@@ -159,7 +265,7 @@ QEMU 提前退出或超时时保留 transcript。测试应根据具体失败阶�
 | `loader_tcp4_listen_failed` | 固件能否在 TCP `2999` 建立被动监听，端口是否已占用 |
 | `loader_broadcast_error` | UDP `2998` 的广播地址和载荷大小；公告是可选发现路径，有设备 IP 时仍可直连 |
 | `serial_binding_required` | 先读取当前 `serial_id`，通过 `POST /api/v1/serial/continue` 完成 `bound` 或显式 `direct` continue，再在启动请求中携带返回的绑定令牌 |
-| `serial` 为 `ready=false` | 检查 `parameters`、`error` 和 `ConOut` 对应的唯一 `SerialIo`；无法唯一选择或读取参数时不能猜测串口 |
+| `serial` 为 `ready=false` | 检查 UEFI `ConOut` 或 axstd EFI console 是否可用，再读取新的 `serial_id` 和 `boot_epoch` |
 | `409 stale_boot_epoch` | 重新读取 `/api/v1/status` 并使用新的启动代次 |
 | 上传被拒绝 | `Content-Length`、`X-Image-Sha256`、清单长度和当前事务 ID |
 
@@ -177,3 +283,11 @@ QEMU 提前退出或超时时保留 transcript。测试应根据具体失败阶�
 | 两份状态均无效 | 停止自动启动，使用备份的原装载器和外部介质恢复 |
 
 当前 OTA 只用 SHA-256 检查传输一致性，适用于可信隔离实验网。MAC 绑定不构成认证；以后引入内核验签时，应先让两槽执行同一验签策略并验证拒绝路径。
+
+
+LoongArch 交接的资源容量与存活对象分开管理。等待下载的 axloader 继续保有声明容量；
+普通目标没有资源计划时，只保留当前镜像、未消费归档及显式存活分配。旧镜像、栈、
+页表和逐核区在目标安装自身执行环境并绑定 CPU-local 后才回收，随后才初始化普通分配器。
+`PreparedHandoff::seal` 在运行时停稳后的无分配窗口发布最终快照，生成可进入的 `SealedHandoff`。
+initramfs 解包借用结束后通过唯一所有者归还完整页；冻结的平台 map 不再修改。
+机制、内存分类与失败边界见[启动内存回收设计](../../design/someboot-boot-resources.md#4-启动内存回收)。
