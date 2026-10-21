@@ -6,7 +6,10 @@
 //! and connectors) from a primary DRM master to secondary lessee processes,
 //! enabling independent control over separate display outputs.
 
-use core::ffi::{c_int, c_void};
+use core::{
+    ffi::{c_int, c_void},
+    sync::atomic::Ordering,
+};
 
 #[cfg(not(test))]
 use drm_kapi::mutex::{mutex_lock, mutex_unlock};
@@ -439,13 +442,18 @@ pub unsafe extern "C" fn drm_lease_revoke(top: *mut DrmMaster) {
 }
 
 /// Validates that requested lease objects only comprise allowed display object types,
-/// and ensures both a CRTC and a Connector are present when requesting a non-empty lease.
+/// and requires an explicit plane when the client uses universal planes.
 ///
 /// # Safety
 /// `objects` must point to an array of `count` valid `DrmModeObject` pointers.
-unsafe fn validate_lease_objects(count: usize, objects: *const *mut DrmModeObject) -> i32 {
+unsafe fn validate_lease_objects(
+    count: usize,
+    objects: *const *mut DrmModeObject,
+    universal_planes: bool,
+) -> i32 {
     let mut has_crtc = false;
     let mut has_connector = false;
+    let mut has_plane = false;
 
     for i in 0..count {
         // SAFETY: `i` is within `0..count`, and `objects` points to `count` entries.
@@ -458,15 +466,33 @@ unsafe fn validate_lease_objects(count: usize, objects: *const *mut DrmModeObjec
         match obj_type {
             DRM_MODE_OBJECT_CRTC => has_crtc = true,
             DRM_MODE_OBJECT_CONNECTOR => has_connector = true,
-            DRM_MODE_OBJECT_PLANE => {}
+            DRM_MODE_OBJECT_PLANE => has_plane = true,
             _ => return -EINVAL,
         }
     }
 
-    if count > 0 && (!has_crtc || !has_connector) {
+    if count > 0 && (!has_crtc || !has_connector || (universal_planes && !has_plane)) {
         return -EINVAL;
     }
     0
+}
+
+/// Insert an object into the unpublished lease set without treating duplicates
+/// as success. The caller destroys the whole set if any insertion fails.
+///
+/// # Safety
+/// `leases` must be a live, exclusively owned IDR initialized by the caller.
+unsafe fn insert_lease_object(leases: *mut Idr, object_id: u32) -> i32 {
+    let Ok(start) = i32::try_from(object_id) else {
+        return -EINVAL;
+    };
+    let Some(end) = start.checked_add(1) else {
+        return -EINVAL;
+    };
+    let marker = core::ptr::addr_of!(LEASE_OBJECT_TOKEN).cast_mut().cast();
+    // SAFETY: The caller owns the unpublished IDR, and the non-null static
+    // marker outlives all leases. The checked range selects exactly this ID.
+    unsafe { idr_alloc(leases, marker, start, end) }
 }
 
 /// Resolves mode object IDs, verifies lessor permissions and availability,
@@ -486,6 +512,10 @@ unsafe fn populate_lease_set(
 ) -> i32 {
     let mut resolved_objects: alloc::vec::Vec<*mut DrmModeObject> =
         alloc::vec::Vec::with_capacity(object_count);
+    // SAFETY: The live lessor file owns this atomic. This single snapshot
+    // selects both validation and implicit-plane expansion for this request;
+    // it does not publish other state, so relaxed ordering is sufficient.
+    let universal_planes = unsafe { (*lessor_priv).universal_planes.load(Ordering::Relaxed) };
 
     // SAFETY: Resolves each requested object ID, enforces lease rules, and populates `leases`.
     unsafe {
@@ -515,7 +545,8 @@ unsafe fn populate_lease_set(
             resolved_objects.push(obj);
         }
 
-        let validation = validate_lease_objects(object_count, resolved_objects.as_ptr());
+        let validation =
+            validate_lease_objects(object_count, resolved_objects.as_ptr(), universal_planes);
         if validation != 0 {
             for &held in &resolved_objects {
                 drm_mode_object_put(held);
@@ -523,25 +554,41 @@ unsafe fn populate_lease_set(
             return validation;
         }
 
-        for idx in 0..object_count {
-            let obj_id = *object_ids.add(idx);
-            let marker = core::ptr::addr_of!(LEASE_OBJECT_TOKEN)
-                .cast_mut()
-                .cast::<core::ffi::c_void>();
-            let ret = idr_alloc(leases, marker, obj_id as i32, obj_id as i32 + 1);
-            if ret < 0 {
-                for &held in &resolved_objects {
-                    drm_mode_object_put(held);
+        let result = (|| {
+            for &object in &resolved_objects {
+                let ret = insert_lease_object(leases, (*object).id);
+                if ret < 0 {
+                    return ret;
                 }
-                return ret;
+                if universal_planes || (*object).r#type != DRM_MODE_OBJECT_CRTC {
+                    continue;
+                }
+                // `object` is the base of a referenced CRTC. Its primary and
+                // optional cursor planes are fixed while the device is live.
+                let crtc = object
+                    .cast::<u8>()
+                    .sub(core::mem::offset_of!(DrmCrtc, base))
+                    .cast::<DrmCrtc>();
+                if (*crtc).primary.is_null() {
+                    return -EINVAL;
+                }
+                for plane in [(*crtc).primary, (*crtc).cursor] {
+                    if !plane.is_null() {
+                        let ret = insert_lease_object(leases, (*plane).base.id);
+                        if ret < 0 {
+                            return ret;
+                        }
+                    }
+                }
             }
-        }
+            0
+        })();
 
         for &held in &resolved_objects {
             drm_mode_object_put(held);
         }
 
-        0
+        result
     }
 }
 
@@ -673,6 +720,9 @@ pub unsafe extern "C" fn drm_mode_list_lessees_ioctl(
     let arg = data.cast::<DrmModeListLessees>();
     // SAFETY: Checking modeset capability and querying lessees list.
     unsafe {
+        if (*arg).pad != 0 {
+            return -EINVAL;
+        }
         if !drm_core_check_feature(dev, DRIVER_MODESET) {
             return -EOPNOTSUPP;
         }
@@ -732,6 +782,9 @@ pub unsafe extern "C" fn drm_mode_get_lease_ioctl(
     let arg = data.cast::<DrmModeGetLease>();
     // SAFETY: Checking modeset capability and querying leased objects.
     unsafe {
+        if (*arg).pad != 0 {
+            return -EINVAL;
+        }
         if !drm_core_check_feature(dev, DRIVER_MODESET) {
             return -EOPNOTSUPP;
         }
