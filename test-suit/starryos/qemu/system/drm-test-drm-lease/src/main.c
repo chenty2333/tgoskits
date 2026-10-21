@@ -203,6 +203,14 @@ int main(void)
               contains(legacy_ids, 4, crtcs[0]) &&
               contains(legacy_ids, 4, connectors[0]),
               "legacy lease includes display objects and implicit planes");
+        struct drm_mode_create_lease busy;
+        int busy_result = create_lease(master, legacy_objects, 2, 0, &busy);
+        CHECK(busy_result == -1 && errno == EBUSY,
+              "active legacy lease rejects a second lease with EBUSY");
+        if (busy_result == 0)
+            close((int)busy.fd);
+        CHECK(count_lessees(master, NULL) == 1,
+              "conflicting lease leaves the original lessee intact");
         check_legacy_scanout((int)legacy.fd, crtcs[0], connectors[0]);
         CHECK_RET(close((int)legacy.fd), 0, "close legacy lease");
     }
@@ -287,6 +295,32 @@ int main(void)
     uint32_t listed = 0;
     CHECK(count_lessees(master, &listed) == 1 && listed == cl.lessee_id,
           "lessor lists the lessee");
+    struct drm_mode_list_lessees list_count = {0};
+    CHECK_RET(syscall(SYS_ioctl, master, DRM_IOCTL_MODE_LIST_LESSEES,
+                      &list_count), 0, "LIST_LESSEES supports count-only queries");
+    CHECK(list_count.count_lessees == 1, "count-only query reports the active lease");
+    struct drm_mode_get_lease object_count = {0};
+    CHECK_RET(syscall(SYS_ioctl, lessee, DRM_IOCTL_MODE_GET_LEASE,
+                      &object_count), 0, "GET_LEASE supports count-only queries");
+    CHECK(object_count.count_objects == 3, "count-only query reports the leased objects");
+    /* A zero-capacity query only counts. With capacity, both null and
+     * inaccessible arrays must fail without rewriting the input count. */
+    for (uintptr_t address = 0; address <= 1; address++) {
+        struct drm_mode_list_lessees bad_list = {
+            .count_lessees = 4, .lessees_ptr = address,
+        };
+        CHECK_ERR(syscall(SYS_ioctl, master, DRM_IOCTL_MODE_LIST_LESSEES,
+                          &bad_list), EFAULT, "LIST_LESSEES rejects a bad array");
+        CHECK(bad_list.count_lessees == 4,
+              "failed LIST_LESSEES preserves the input count");
+        struct drm_mode_get_lease bad_get = {
+            .count_objects = 4, .objects_ptr = address,
+        };
+        CHECK_ERR(syscall(SYS_ioctl, lessee, DRM_IOCTL_MODE_GET_LEASE,
+                          &bad_get), EFAULT, "GET_LEASE rejects a bad array");
+        CHECK(bad_get.count_objects == 4,
+              "failed GET_LEASE preserves the input count");
+    }
     close(lessee);
     CHECK(count_lessees(master, NULL) == 0, "closing the lessee file ends the lease");
 
@@ -300,6 +334,12 @@ int main(void)
               "revoked lessee GET_LEASE");
     CHECK(gl.count_objects == 0, "revoked lessee holds no objects");
     CHECK(count_lessees(master, NULL) == 0, "LIST_LESSEES skips a revoked lease");
+    struct drm_mode_create_lease replacement;
+    int replacement_result = create_lease(master, objects, 3, 0, &replacement);
+    CHECK(replacement_result == 0,
+          "revoked objects can be leased again before the old fd closes");
+    if (replacement_result == 0)
+        CHECK_RET(close((int)replacement.fd), 0, "close replacement lease");
     close(lessee);
     CHECK_ERR(ioctl(master, DRM_IOCTL_MODE_REVOKE_LEASE, &revoke), ENOENT,
               "revoking a closed lessee reports ENOENT");

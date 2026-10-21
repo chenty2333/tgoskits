@@ -14,7 +14,9 @@ use core::{
 #[cfg(not(test))]
 use drm_kapi::mutex::{mutex_lock, mutex_unlock};
 use drm_kapi::{
-    config::{EFAULT, EINVAL, ENODEV, ENOMEM, EOPNOTSUPP, GFP_KERNEL},
+    config::{
+        EBUSY, EFAULT, EINVAL, ENODEV, ENOMEM, EOPNOTSUPP, GFP_KERNEL, err_ptr, is_err, ptr_err,
+    },
     idr::{Idr, idr_get_next},
     kernel_services::ProviderSlot,
     list::{list_add_tail, list_del},
@@ -324,49 +326,76 @@ pub unsafe extern "C" fn drm_lease_filter_crtcs(file_priv: *mut DrmFile, crtcs_i
     }
 }
 
-/// Allocates and initializes a new lessee `DrmMaster` under `lessor`.
+/// Checks and publishes the final lease set atomically, returning an error
+/// pointer if any object disappeared, is already leased, or allocation fails.
 ///
 /// # Safety
-/// `lessor` and `leases` must be valid, properly initialized pointers.
+/// `lessor` must be a referenced root master on a live device. `leases` must
+/// be an exclusively owned, initialized IDR of mode object IDs. The caller
+/// must not hold `idr_mutex`. Success transfers the set; failure leaves it owned
+/// by the caller.
 unsafe fn create_lessee_master(lessor: *mut DrmMaster, leases: *mut Idr) -> *mut DrmMaster {
-    // SAFETY: Creating a lessee master, assigning its unique ID from the root owner IDR,
-    // transferring lease mappings, and appending to lessor's lessees list.
+    // SAFETY: The caller owns the unpublished IDR and retains `lessor` and its
+    // device. `idr_mutex` protects all published object/lease lookups through
+    // publication, excluding concurrent creation, destruction and revocation.
     unsafe {
         let dev = (*lessor).dev;
         let lessee = drm_master_create(dev);
         if lessee.is_null() {
-            return core::ptr::null_mut();
+            return err_ptr(-ENOMEM);
         }
 
         let mutex_ptr = core::ptr::addr_of_mut!((*dev).mode_config.idr_mutex);
         mutex_lock(mutex_ptr);
 
-        let owner = drm_lease_owner(lessor);
-        let id_alloc = idr_alloc(
-            core::ptr::addr_of_mut!((*owner).lessee_idr),
-            lessee.cast(),
-            1,
-            0,
-        );
+        let result = (|| {
+            let mut object = 0;
+            while !idr_get_next(leases.cast(), &mut object).is_null() {
+                if idr_find(
+                    core::ptr::addr_of_mut!((*dev).mode_config.object_idr),
+                    object as core::ffi::c_ulong,
+                )
+                .is_null()
+                {
+                    return Err(-ENOENT);
+                }
+                if is_object_already_leased(lessor, object) {
+                    return Err(-EBUSY);
+                }
+                object += 1;
+            }
 
-        if id_alloc < 0 {
-            mutex_unlock(mutex_ptr);
-            let mut l = lessee;
-            drm_master_put(core::ptr::addr_of_mut!(l));
-            return core::ptr::null_mut();
-        }
+            let owner = drm_lease_owner(lessor);
+            let id_alloc = idr_alloc(
+                core::ptr::addr_of_mut!((*owner).lessee_idr),
+                lessee.cast(),
+                1,
+                0,
+            );
+            if id_alloc < 0 {
+                return Err(id_alloc);
+            }
 
-        (*lessee).lessee_id = id_alloc;
-        (*lessee).lessor = drm_master_get(lessor);
-        core::ptr::swap(core::ptr::addr_of_mut!((*lessee).leases), leases);
-
-        list_add_tail(
-            core::ptr::addr_of_mut!((*lessee).lessee_list),
-            core::ptr::addr_of_mut!((*lessor).lessees),
-        );
+            (*lessee).lessee_id = id_alloc;
+            (*lessee).lessor = drm_master_get(lessor);
+            core::ptr::swap(core::ptr::addr_of_mut!((*lessee).leases), leases);
+            list_add_tail(
+                core::ptr::addr_of_mut!((*lessee).lessee_list),
+                core::ptr::addr_of_mut!((*lessor).lessees),
+            );
+            Ok(())
+        })();
 
         mutex_unlock(mutex_ptr);
-        lessee
+        if let Err(error) = result {
+            // Destruction can acquire `idr_mutex`, so drop the unpublished
+            // master only after unlocking. The caller still owns `leases`.
+            let mut lessee = lessee;
+            drm_master_put(core::ptr::addr_of_mut!(lessee));
+            err_ptr(error)
+        } else {
+            lessee
+        }
     }
 }
 
@@ -495,17 +524,16 @@ unsafe fn insert_lease_object(leases: *mut Idr, object_id: u32) -> i32 {
     unsafe { idr_alloc(leases, marker, start, end) }
 }
 
-/// Resolves mode object IDs, verifies lessor permissions and availability,
-/// checks object type constraints, and records the IDs into `leases`.
+/// Resolves mode object IDs, checks object type constraints, and records the
+/// explicit and implicit IDs into `leases`. Publication rechecks availability.
 ///
 /// # Safety
-/// `dev`, `lessor_priv`, `lessor`, and `leases` must be valid pointers. `lessor` must be the
-/// referenced master returned by `drm_file_get_master(lessor_priv)` and stay live for this
-/// call. `object_ids` must point to `object_count` valid `u32` entries.
+/// `dev` and `lessor_priv` must stay live for this call, and `leases` must be
+/// exclusively owned and initialized. `object_ids` must point to
+/// `object_count` valid, kernel-owned `u32` entries.
 unsafe fn populate_lease_set(
     dev: *mut DrmDevice,
     lessor_priv: *mut DrmFile,
-    lessor: *mut DrmMaster,
     leases: *mut Idr,
     object_count: usize,
     object_ids: *const u32,
@@ -527,19 +555,6 @@ unsafe fn populate_lease_set(
                     drm_mode_object_put(held);
                 }
                 return -ENOENT;
-            }
-
-            // Use the caller's referenced master instead of re-reading
-            // `(*lessor_priv).master`, which can change under SET_MASTER or
-            // DROP_MASTER and would be an unsynchronized read here.
-            if !master_holds_object(lessor, obj_id as i32)
-                || is_object_already_leased(lessor, obj_id as i32)
-            {
-                drm_mode_object_put(obj);
-                for &held in &resolved_objects {
-                    drm_mode_object_put(held);
-                }
-                return -EACCES;
             }
 
             resolved_objects.push(obj);
@@ -660,7 +675,6 @@ pub unsafe extern "C" fn drm_mode_create_lease_ioctl(
             let pop_res = populate_lease_set(
                 dev,
                 lessor_priv,
-                lessor,
                 core::ptr::addr_of_mut!(leases),
                 object_count,
                 id_buf,
@@ -675,10 +689,10 @@ pub unsafe extern "C" fn drm_mode_create_lease_ioctl(
         }
 
         let lessee = create_lessee_master(lessor, core::ptr::addr_of_mut!(leases));
-        if lessee.is_null() {
+        if is_err(lessee) {
             idr_destroy(core::ptr::addr_of_mut!(leases));
             drm_master_put(core::ptr::addr_of_mut!(lessor));
-            return -ENOMEM;
+            return ptr_err(lessee);
         }
 
         let lessee_id = (*lessee).lessee_id as u32;
@@ -745,7 +759,7 @@ pub unsafe extern "C" fn drm_mode_list_lessees_ioctl(
             let first_entry =
                 idr_get_next(core::ptr::addr_of_mut!((*lessee).leases).cast(), &mut dummy);
             if !first_entry.is_null() {
-                if total_active < max_entries && !user_ptr.is_null() {
+                if total_active < max_entries {
                     let id_val = (*lessee).lessee_id as u32;
                     let dest = user_ptr.add(total_active as usize);
                     if copy_to_user(
@@ -763,7 +777,9 @@ pub unsafe extern "C" fn drm_mode_list_lessees_ioctl(
             true
         });
 
-        (*arg).count_lessees = total_active;
+        if err == 0 {
+            (*arg).count_lessees = total_active;
+        }
         mutex_unlock(mutex_ptr);
         drm_master_put(core::ptr::addr_of_mut!(lessor));
         err
@@ -815,7 +831,7 @@ pub unsafe extern "C" fn drm_mode_get_lease_ioctl(
                 break;
             }
 
-            if total_count < max_objects && !user_ptr.is_null() {
+            if total_count < max_objects {
                 let id_val = cursor as u32;
                 let dest = user_ptr.add(total_count as usize);
                 if copy_to_user(
@@ -833,7 +849,9 @@ pub unsafe extern "C" fn drm_mode_get_lease_ioctl(
             cursor += 1;
         }
 
-        (*arg).count_objects = total_count;
+        if err == 0 {
+            (*arg).count_objects = total_count;
+        }
         mutex_unlock(mutex_ptr);
         drm_master_put(core::ptr::addr_of_mut!(lessee));
         err
@@ -887,11 +905,14 @@ pub unsafe extern "C" fn drm_mode_revoke_lease_ioctl(
 
 #[cfg(test)]
 mod tests {
+    use drm_kapi::config::{EBUSY, is_err, ptr_err};
+
     use super::*;
     use crate::{
         drm_drv_types::DrmDriver,
         drm_drv_upstream::{drm_dev_alloc, drm_dev_put},
         drm_file_upstream::{drm_file_alloc, drm_file_free},
+        drm_mode_object_upstream::{drm_mode_object_add, drm_mode_object_unregister},
     };
 
     #[test]
@@ -910,6 +931,51 @@ mod tests {
 
             drm_file_free(file_priv);
             drm_dev_put(dev);
+        }
+    }
+
+    #[test]
+    fn lease_publication_rechecks_pending_objects() {
+        let mut fixture = crate::test_support::TestDrm::new(DRIVER_MODESET);
+        fixture.init_registry();
+        let dev = fixture.ptr();
+        // SAFETY: The fixture owns the device and registry until all masters
+        // and the stack-owned mode object have been removed below.
+        unsafe {
+            let mut master = drm_master_create(dev);
+            let mut plane: DrmModeObject = core::mem::zeroed();
+            assert_eq!(
+                drm_mode_object_add(dev, &mut plane, DRM_MODE_OBJECT_PLANE),
+                0
+            );
+            let mut first: Idr = core::mem::zeroed();
+            let mut pending: Idr = core::mem::zeroed();
+            idr_init(&mut first);
+            idr_init(&mut pending);
+            assert!(insert_lease_object(&mut first, plane.id) >= 0);
+            assert!(insert_lease_object(&mut pending, plane.id) >= 0);
+
+            // Both requests built their unpublished object sets before either
+            // committed. The second publisher must recheck the final set,
+            // including planes added implicitly during request preparation.
+            let mut winner = create_lessee_master(master, &mut first);
+            assert!(!winner.is_null() && !is_err(winner));
+            let loser = create_lessee_master(master, &mut pending);
+            assert!(is_err(loser));
+            assert_eq!(ptr_err(loser), -EBUSY);
+            assert!(master_holds_object(winner, plane.id as i32));
+            assert!(!idr_find(&mut pending, plane.id as core::ffi::c_ulong).is_null());
+
+            drm_master_put(&mut winner);
+            let mut retry = create_lessee_master(master, &mut pending);
+            assert!(!retry.is_null() && !is_err(retry));
+            drm_master_put(&mut retry);
+            idr_destroy(&mut first);
+            idr_destroy(&mut pending);
+            drm_mode_object_unregister(dev, &mut plane);
+
+            drm_master_put(&mut master);
+            idr_destroy(core::ptr::addr_of_mut!((*dev).mode_config.object_idr));
         }
     }
 
