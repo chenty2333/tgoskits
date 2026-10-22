@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
+if ! linker=$(command -v ld.lld); then
+    echo 'venus-regression: ld.lld is required; install LLD (Ubuntu/Debian: apt-get install lld; Fedora: dnf install lld) and add it to PATH.' >&2
+    exit 1
+fi
 # This application exercises CPU mappings of host Vulkan memory. On Intel xe
 # the required KVM/PAT contract is only available in QEMU 11 and newer.
 python3 - <<'CHECK_QEMU'
@@ -39,7 +43,7 @@ for attempt in 1 2 3; do
     sleep "$((attempt * 5))"
 done
 mkdir -p "$overlay/usr/bin" "$overlay/usr/share"
-linker_dir="$(dirname "$(command -v ld.lld)")"
+linker_dir="$(dirname "$linker")"
 x86_64-linux-musl-gcc -B"$linker_dir/" -fuse-ld=lld --sysroot="$stage" -std=c11 -Wall -Wextra -Werror \
     "$STARRY_APP_DIR/main.c" "$STARRY_APP_DIR/execbuf_signal.c" \
     -L"$stage/usr/lib" -Wl,-rpath-link,"$stage/usr/lib" \

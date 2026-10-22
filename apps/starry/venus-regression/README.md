@@ -6,6 +6,15 @@ QEMU/virglrenderer 的 x86_64 主机上运行。QEMU 必须为 11 或更新版�
 这是 [Mesa Venus 的平台要求](https://docs.mesa3d.org/drivers/venus.html)，不是关闭
 fence-feedback 的替代方案。
 
+宿主构建工具还需要 `x86_64-linux-musl-gcc` 和 LLVM 链接器 **`ld.lld`**，二者均须在
+`PATH` 中。应用预构建固定使用 `-fuse-ld=lld`，不能仅以已安装 GCC 或 Clang 代替。
+Ubuntu/Debian 可通过 `sudo apt-get install lld` 安装，Fedora 使用 `sudo dnf install lld`。
+这不要求替换系统默认链接器。预构建会在镜像解包、下载前检查 `ld.lld`，缺少时直接
+给出安装提示并失败。
+
+从普通 CI 基础镜像准备图形容器时，除补齐 Mesa/Venus、virglrenderer、QEMU 图形
+依赖外，也须额外安装 `lld`；普通无图形 CI 不需要因此启用 Venus。
+
 运行：
 
 ```sh
