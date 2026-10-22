@@ -538,8 +538,12 @@ unsafe fn populate_lease_set(
     object_count: usize,
     object_ids: *const u32,
 ) -> i32 {
-    let mut resolved_objects: alloc::vec::Vec<*mut DrmModeObject> =
-        alloc::vec::Vec::with_capacity(object_count);
+    let mut resolved_objects: alloc::vec::Vec<*mut DrmModeObject> = alloc::vec::Vec::new();
+    // Reserve before acquiring object references, so every later push fits
+    // and allocation failure follows the caller's unpublished-lease cleanup.
+    if resolved_objects.try_reserve_exact(object_count).is_err() {
+        return -ENOMEM;
+    }
     // SAFETY: The live lessor file owns this atomic. This single snapshot
     // selects both validation and implicit-plane expansion for this request;
     // it does not publish other state, so relaxed ordering is sufficient.
@@ -722,6 +726,16 @@ pub unsafe extern "C" fn drm_mode_create_lease_ioctl(
     }
 }
 
+/// Compute a complete output word's user address without claiming that
+/// independently mapped user pages belong to one Rust allocation. Only
+/// `copy_to_user` may access the resulting address.
+fn lease_output_address(base: u64, index: u32) -> Option<*mut c_void> {
+    let offset = (index as usize).checked_mul(core::mem::size_of::<u32>())?;
+    let address = (base as usize).checked_add(offset)?;
+    address.checked_add(core::mem::size_of::<u32>())?;
+    Some(address as *mut c_void)
+}
+
 /// Handler for the DRM_IOCTL_MODE_LIST_LESSEES ioctl.
 #[unsafe(no_mangle)]
 /// # Safety
@@ -749,7 +763,6 @@ pub unsafe extern "C" fn drm_mode_list_lessees_ioctl(
         let mutex_ptr = core::ptr::addr_of_mut!((*dev).mode_config.idr_mutex);
         mutex_lock(mutex_ptr);
 
-        let user_ptr = (*arg).lessees_ptr as *mut u32;
         let max_entries = (*arg).count_lessees;
         let mut total_active = 0u32;
         let mut err = 0;
@@ -761,9 +774,12 @@ pub unsafe extern "C" fn drm_mode_list_lessees_ioctl(
             if !first_entry.is_null() {
                 if total_active < max_entries {
                     let id_val = (*lessee).lessee_id as u32;
-                    let dest = user_ptr.add(total_active as usize);
+                    let Some(dest) = lease_output_address((*arg).lessees_ptr, total_active) else {
+                        err = -EFAULT;
+                        return false;
+                    };
                     if copy_to_user(
-                        dest.cast(),
+                        dest,
                         core::ptr::addr_of!(id_val).cast(),
                         core::mem::size_of::<u32>(),
                     ) != 0
@@ -819,7 +835,6 @@ pub unsafe extern "C" fn drm_mode_get_lease_ioctl(
             core::ptr::addr_of_mut!((*lessee).leases)
         };
 
-        let user_ptr = (*arg).objects_ptr as *mut u32;
         let max_objects = (*arg).count_objects;
         let mut total_count = 0u32;
         let mut err = 0;
@@ -833,9 +848,12 @@ pub unsafe extern "C" fn drm_mode_get_lease_ioctl(
 
             if total_count < max_objects {
                 let id_val = cursor as u32;
-                let dest = user_ptr.add(total_count as usize);
+                let Some(dest) = lease_output_address((*arg).objects_ptr, total_count) else {
+                    err = -EFAULT;
+                    break;
+                };
                 if copy_to_user(
-                    dest.cast(),
+                    dest,
                     core::ptr::addr_of!(id_val).cast(),
                     core::mem::size_of::<u32>(),
                 ) != 0
@@ -948,6 +966,38 @@ mod tests {
                 drm_mode_object_add(dev, &mut plane, DRM_MODE_OBJECT_PLANE),
                 0
             );
+            // Fail the real scratch Vec allocation after the fallible input
+            // copy has been allocated. This stack file borrows our live master.
+            let mut file: DrmFile = core::mem::zeroed();
+            file.master = master;
+            drm_kapi::locks::spin_lock_init(&mut file.master_lookup_lock);
+            let objects = [plane.id; 3];
+            let mut request = DrmModeCreateLease {
+                object_ids: objects.as_ptr() as u64,
+                object_count: objects.len() as u32,
+                flags: 0,
+                lessee_id: u32::MAX,
+                fd: u32::MAX,
+            };
+            let refs = drm_kapi::memory::kref_read(&(*master).refcount);
+            let (result, rejected, balance) = crate::test_support::with_allocation_failure(
+                core::alloc::Layout::array::<*mut DrmModeObject>(objects.len()).unwrap(),
+                || {
+                    drm_mode_create_lease_ioctl(
+                        dev,
+                        (&mut request as *mut DrmModeCreateLease).cast(),
+                        &mut file,
+                    )
+                },
+            );
+            assert!(rejected, "the scratch allocation must actually fail");
+            assert_eq!(result, -ENOMEM);
+            assert_eq!(balance, 0, "the copied input buffer must be freed");
+            assert_eq!(drm_kapi::memory::kref_read(&(*master).refcount), refs);
+            assert_eq!(request.lessee_id, u32::MAX);
+            assert_eq!(request.fd, u32::MAX);
+            assert!(drm_kapi::idr::idr_is_empty(&(*master).lessee_idr));
+
             let mut first: Idr = core::mem::zeroed();
             let mut pending: Idr = core::mem::zeroed();
             idr_init(&mut first);
@@ -981,6 +1031,12 @@ mod tests {
 
     #[test]
     fn test_null_pointers_and_boundary_conditions() {
+        assert_eq!(
+            lease_output_address(4092, 2),
+            Some(4100usize as *mut c_void)
+        );
+        assert!(lease_output_address(u64::MAX - 2, 0).is_none());
+        assert!(lease_output_address(u64::MAX - 7, 2).is_none());
         // SAFETY: Testing null handling across lease interfaces.
         unsafe {
             assert!(drm_lease_owner(core::ptr::null_mut()).is_null());

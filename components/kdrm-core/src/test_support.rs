@@ -3,6 +3,7 @@
 //! Host-side fixtures for DRM object lifecycle and helper behavior.
 
 use std::{
+    alloc::{GlobalAlloc, Layout, System},
     boxed::Box,
     sync::{
         Condvar, Mutex, OnceLock,
@@ -26,6 +27,78 @@ std::thread_local! {
     static HOST_TASK_ID: u64 = NEXT_HOST_TASK_ID.fetch_add(1, Ordering::Relaxed);
     static HOST_ADMIN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static HOST_SIGNAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static REJECT_ALLOCATION: std::cell::Cell<Option<Layout>> = const { std::cell::Cell::new(None) };
+    static ALLOCATION_REJECTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static ALLOCATION_BALANCE: std::cell::Cell<Option<isize>> = const { std::cell::Cell::new(None) };
+}
+
+struct HostTestAllocator;
+
+#[global_allocator]
+static HOST_TEST_ALLOCATOR: HostTestAllocator = HostTestAllocator;
+
+fn record_allocation(change: isize) {
+    let _ = ALLOCATION_BALANCE.try_with(|balance| {
+        if let Some(current) = balance.get() {
+            balance.set(Some(current + change));
+        }
+    });
+}
+
+// SAFETY: All successful allocations and deallocations use System with the
+// original layout. A one-shot, thread-local rejection returns null as allowed
+// by GlobalAlloc. The const-initialized TLS cells never allocate recursively.
+unsafe impl GlobalAlloc for HostTestAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let reject = REJECT_ALLOCATION
+            .try_with(|next| {
+                if next.get() == Some(layout) {
+                    next.set(None);
+                    ALLOCATION_REJECTED.set(true);
+                    true
+                } else {
+                    false
+                }
+            })
+            .unwrap_or(false);
+        if reject {
+            return core::ptr::null_mut();
+        }
+        // SAFETY: Forward the caller's allocation layout unchanged.
+        let pointer = unsafe { System.alloc(layout) };
+        if !pointer.is_null() {
+            record_allocation(1);
+        }
+        pointer
+    }
+
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        record_allocation(-1);
+        // SAFETY: The caller returns the original System pointer and layout.
+        unsafe { System.dealloc(pointer, layout) };
+    }
+}
+
+/// Reject one real allocation of `layout` in this thread and report whether
+/// it was reached and how many successful allocations remain after `run`.
+pub fn with_allocation_failure<T>(layout: Layout, run: impl FnOnce() -> T) -> (T, bool, isize) {
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            REJECT_ALLOCATION.set(None);
+            ALLOCATION_BALANCE.set(None);
+        }
+    }
+    assert!(ALLOCATION_BALANCE.get().is_none());
+    ALLOCATION_REJECTED.set(false);
+    ALLOCATION_BALANCE.set(Some(0));
+    REJECT_ALLOCATION.set(Some(layout));
+    let restore = Restore;
+    let result = run();
+    let rejected = ALLOCATION_REJECTED.get();
+    let balance = ALLOCATION_BALANCE.get().unwrap();
+    drop(restore);
+    (result, rejected, balance)
 }
 
 pub fn with_task_policy<T>(admin: bool, signal: bool, run: impl FnOnce() -> T) -> T {

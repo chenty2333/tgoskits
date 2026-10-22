@@ -9,6 +9,7 @@
 #include "test_framework.h"
 #include <fcntl.h>
 #include <stdint.h>
+#include <sys/mman.h>
 #include <sys/ioctl.h>
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -162,6 +163,78 @@ static void check_legacy_scanout(int fd, uint32_t crtc, uint32_t connector)
     struct drm_mode_destroy_dumb destroy = { .handle = dumb.handle };
     CHECK_RET(syscall(SYS_ioctl, fd, DRM_IOCTL_MODE_DESTROY_DUMB, &destroy), 0,
               "release leased scanout buffer");
+}
+
+/* Adjacent mappings with different backing must not be treated as one Rust
+ * allocation. GET_LEASE advances into the second mapping; LIST_LESSEES also
+ * exercises a single (unaligned) output that straddles the mapping boundary. */
+static void check_query_mappings(int master, int lessee, const uint32_t *objects,
+                                  uint32_t lessee_id)
+{
+    size_t page = (size_t)sysconf(_SC_PAGESIZE);
+    void *region = mmap(NULL, page * 2, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    CHECK(region != MAP_FAILED, "reserve adjacent query mappings");
+    if (region == MAP_FAILED)
+        return;
+    uintptr_t boundary = (uintptr_t)region + page;
+    int backing = (int)syscall(SYS_memfd_create, "lease-query", 0);
+    CHECK(backing >= 0, "create independent query mapping backing");
+    if (backing < 0)
+        goto out;
+    int truncated = ftruncate(backing, (off_t)page);
+    CHECK(truncated == 0, "size query mapping backing");
+    if (truncated != 0)
+        goto out;
+    void *first = mmap(region, page, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    void *second = mmap((void *)boundary, page, PROT_READ | PROT_WRITE,
+                        MAP_SHARED | MAP_FIXED, backing, 0);
+    CHECK(first == region && second == (void *)boundary,
+          "install adjacent private and file-backed query mappings");
+    if (first != region || second != (void *)boundary)
+        goto out;
+
+    struct drm_mode_get_lease get = {
+        .count_objects = 3, .objects_ptr = boundary - sizeof(uint32_t),
+    };
+    CHECK_RET(syscall(SYS_ioctl, lessee, DRM_IOCTL_MODE_GET_LEASE, &get), 0,
+              "GET_LEASE writes across independent mappings");
+    uint32_t ids[3];
+    memcpy(ids, (void *)(uintptr_t)get.objects_ptr, sizeof(ids));
+    CHECK(get.count_objects == 3 && contains(ids, 3, objects[0]) &&
+          contains(ids, 3, objects[1]) && contains(ids, 3, objects[2]),
+          "cross-mapping output contains the leased object IDs");
+    struct drm_mode_list_lessees list = {
+        .count_lessees = 1, .lessees_ptr = boundary - 2,
+    };
+    CHECK_RET(syscall(SYS_ioctl, master, DRM_IOCTL_MODE_LIST_LESSEES, &list), 0,
+              "LIST_LESSEES writes an ID across the mapping boundary");
+    uint32_t listed = 0;
+    memcpy(&listed, (void *)(uintptr_t)list.lessees_ptr, sizeof(listed));
+    CHECK(list.count_lessees == 1 && listed == lessee_id,
+          "cross-mapping output contains the active lessee ID");
+
+    int protected = mprotect(second, page, PROT_NONE);
+    CHECK(protected == 0, "make the second query mapping inaccessible");
+    if (protected == 0) {
+        get.count_objects = 4;
+        CHECK_ERR(syscall(SYS_ioctl, lessee, DRM_IOCTL_MODE_GET_LEASE, &get),
+                  EFAULT, "GET_LEASE faults after a valid output prefix");
+        CHECK(get.count_objects == 4, "partial output fault preserves object count");
+        memcpy(&listed, (void *)(uintptr_t)get.objects_ptr, sizeof(listed));
+        CHECK(contains(objects, 3, listed), "valid prefix was copied before EFAULT");
+        list.count_lessees = 4;
+        CHECK_ERR(syscall(SYS_ioctl, master, DRM_IOCTL_MODE_LIST_LESSEES, &list),
+                  EFAULT, "LIST_LESSEES faults on a split output ID");
+        CHECK(list.count_lessees == 4, "split output fault preserves lessee count");
+        CHECK_RET(mprotect(second, page, PROT_READ | PROT_WRITE), 0,
+                  "restore query mapping permissions before teardown");
+    }
+out:
+    CHECK_RET(munmap(region, page), 0, "release private query mapping");
+    CHECK_RET(munmap((void *)boundary, page), 0, "release file-backed query mapping");
+    if (backing >= 0)
+        CHECK_RET(close(backing), 0, "close query mapping backing");
 }
 
 int main(void)
@@ -321,6 +394,7 @@ int main(void)
         CHECK(bad_get.count_objects == 4,
               "failed GET_LEASE preserves the input count");
     }
+    check_query_mappings(master, lessee, objects, cl.lessee_id);
     close(lessee);
     CHECK(count_lessees(master, NULL) == 0, "closing the lessee file ends the lease");
 
