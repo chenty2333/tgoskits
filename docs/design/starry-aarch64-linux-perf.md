@@ -51,11 +51,11 @@ PMU 寄存器、IRQ PPI 和计数器槽天然属于 CPU。task event 的 fd 只�
 
 寄存器操作通过 `hw_owner::on_pmu/on_counter` 进入 HAL 的局部排他会话并使用 `ax_cpu::pmu::Pmu`，不保留旧自由函数。Linux event/cache 编码和 cluster 选择归 `event_map`；硬件 `PmuInfo` 保留 MIDR 与完整 PMCEID。
 
-首次初始化 reset 后选择 32 位 programmable overflow，保持 `SamplingCount` 和 `CounterExtender` 的算术契约，cycle 保持 64 位。`Pmu::disable_overflow_irq()` 同时清除 pending 标志，因此 counting 停止顺序为停表、结算 pending wrap、禁用 IRQ、注销。`system_flex::tests::stop_is_not_published_before_hardware_commit` 通过真实 PMU 溢出验证该顺序和停止状态的发布边界。
+首次初始化 reset 后选择 32 位 programmable overflow，`CounterExtender` 保持对应算术契约；cycle 保持 64 位，`SamplingCount` 按实际计数器宽度结算 delta。原生周期采样复用现有 `CounterId::CYCLE` 和 bit 31 overflow，不将原始值截成 u32。`Pmu::disable_overflow_irq()` 同时清除 pending 标志，因此 counting 停止顺序为停表、结算 pending wrap、禁用 IRQ、注销。`system_flex::tests::stop_is_not_published_before_hardware_commit` 通过真实 PMU 溢出验证该顺序和停止状态的发布边界。
 
 ### 2.1 每核状态
 
-`percpu::CPU_STATES` 按 CPU 缓存 `PmuInfo` 和复用游标；`PmuInfo` 包含 `MIDR_EL1`、counter 数量与宽度以及 `PMCEID0/1_EL0`。`hw_allocation::HwAlloc` 在同一个 `RawSpinLock` 内维护可迁移 task cycle 的全局保留状态，以及 system sampling 与 flexible slice 共用的每 CPU programmable bitmap。programmable counting 不在 open 时保留固定槽；generic/named cycles 优先申请专用 cycle，耗尽时也进入 flexible 队列。system cycle counter 也逐 CPU 保留；全局 task cycle 保留与任何本核 cycle 保留互斥。system event 的分配、失败回滚与关闭都携带同一个 `PerfCpuId`，并从目标 CPU 的能力缓存校验事件，不再读取 opener CPU 的 PMU 能力。分配数量使用本次已验证目标的参数，不通过可被另一 opener 覆盖的全局数量传递。sysfs 从同一探测结果发布 event source 与 CPU mask。
+`percpu::CPU_STATES` 按 CPU 缓存 `PmuInfo` 和复用游标；`PmuInfo` 包含 `MIDR_EL1`、counter 数量与宽度以及 `PMCEID0/1_EL0`。`hw_allocation::HwAlloc` 在同一个 `RawSpinLock` 内维护可迁移 task cycle 的全局保留状态，以及 system sampling 与 flexible slice 共用的每 CPU programmable bitmap。programmable counting 不在 open 时保留固定槽；generic、RAW 和 named 事件在归一化为 `CPU_CYCLES` 后均优先申请专用 cycle，计数和采样采用同一偏好。task 冲突回退到 programmable flexible，system counting 冲突回退到 flexible，system sampling 则在 open 时保留普通物理槽。system cycle counter 也逐 CPU 保留；全局 task cycle 保留与任何本核 cycle 保留互斥。system event 的分配、失败回滚与关闭都携带同一个 `PerfCpuId`，并从目标 CPU 的能力缓存校验事件，不再读取 opener CPU 的 PMU 能力。分配数量使用本次已验证目标的参数，不通过可被另一 opener 覆盖的全局数量传递。sysfs 从同一探测结果发布 event source 与 CPU mask。
 
 `perf-hw-cpu-slots` 在四个 CPU 上各启用两个 system event，分别测试 sampling 与 counting。总数超过 QEMU 单核六个 programmable slot，但每核需求仍有余量。所有事件同时存在时读取非零计数，关闭后重复整个流程，验证独立容量与槽回收；旧全局 bitmap 在第七次 open 返回 `EBUSY`。
 
@@ -70,7 +70,7 @@ flowchart LR
 
 task event 用 `PmuRunState` 和携带 owner CPU、counter、registration 的 `PmuRunLease` 约束当前硬件代。RESET 先禁止重新调入并完成当前代停表，再清值和恢复原启用意图。disable、close 和线程退出先在 owner CPU 撤下 counter 与 `SampleSlot`，再释放保存 ring 生命周期的锚点，避免旧事件清除已经复用的槽或让 IRQ 看到失效指针。
 
-`hw_open::perf_event_open_hw()` 只对需要 programmable overflow 的路径要求 PMU IRQ；无 IRQ 描述的平台仍可使用 64 位专用 cycle 做非继承计数。sampling、programmable counting、cycle 回退和 task inherit 在缺少 IRQ 时返回 `ENODEV`，检查在创建 worker 前完成，已保留的专用槽在失败时回收。Linux v7.1 的 [`arm_pmu_platform.c`](https://github.com/torvalds/linux/blob/8cd9520d35a6c38db6567e97dd93b1f11f185dc6/drivers/perf/arm_pmu_platform.c) 也保留无 IRQ 的 PMU，但仅对 sampling 返回 `EOPNOTSUPP`；Starry 的 programmable 软件扩展依赖 overflow，故这部分支持范围和错误码仍有明确差异。
+`hw_open::perf_event_open_hw()` 对全部 sampling 和需要 programmable overflow 的计数路径要求 PMU IRQ；原生周期采样不能绕过该准入。无 IRQ 描述的平台仍可使用 64 位专用 cycle 做非继承计数。sampling、programmable counting、cycle 回退和 task inherit 在缺少 IRQ 时返回 `ENODEV`，检查在创建 worker 前完成，已保留的专用槽在失败时回收。Linux v7.1 的 [`arm_pmu_platform.c`](https://github.com/torvalds/linux/blob/8cd9520d35a6c38db6567e97dd93b1f11f185dc6/drivers/perf/arm_pmu_platform.c) 也保留无 IRQ 的 PMU，但仅对 sampling 返回 `EOPNOTSUPP`；Starry 的 programmable 软件扩展依赖 overflow，故这部分支持范围和错误码仍有明确差异。
 
 ### 2.2 调度与复用
 
@@ -96,6 +96,8 @@ stateDiagram-v2
 进程的 perf、CPU interval timer 和 RTTIME watchdog 需求共同驱动 `SchedulerTickGate`。`ProcessAccountingState::publish_scheduler_tick_gate()` 在一个短的 IRQ-safe 临界区内重新读取所有来源并发布 gate，避免最后一个 perf lease 释放时计算出的旧关闭值覆盖并发新 lease 的启用。来源计数仍先发布、再调用统一 refresh；临界区不获取 timer 或 scheduler task 锁，也不分配。kernel 回归在来源快照与 gate 写入之间尝试插入另一个发布，验证该事务边界不能被穿过。
 
 `SystemFlexCounter::control_on_owner()` 对照 Linux v7.1 的 `event_function_call()` → `cpu_function_call()` → `smp_call_function_single(..., wait=1)`，通过同步 `run_on_cpu_sync()` 完成固定 CPU 事件的控制。本核直接执行，远端由 IPI 执行，不等待普通优先级的 `perf-flex` 或 `perf-cpu` worker，避免 FIFO 调用者或 owner CPU 上的 FIFO 负载阻止停表。调用方只禁止迁移，不屏蔽远端等待期间的本核 IPI，也不持 callback 所需的锁。
+
+上述进展保证也适用于归一化周期事件获选原生计数器后的纯计数寄存器事务，不能因 RAW 表达方式进入另一条依赖普通 worker 的 read、启停或 RESET 路径。任务上下文拥有请求及结果，远端回调只执行 owner-local 的有限事务；采样登记、输出更替及最后引用的回收不能未经生命周期审计直接移入 IPI。
 
 `SystemFlexCounter::finish_slice_observed()` 将 active 锁保持到停表、注销、累计值提交和槽释放全部完成，不能在取出 slice 时提前发布完成。`sampling::detach_counting()` 只撤销登记并转移引用；IPI 把取下的 `Arc` 写入调用方栈上的 `ControlRequest`，同步返回后由 task context 释放。传输失败沿 ioctl 调用链返回，不伪造完成。`reset_on_owner()` 在原槽上清零计数、溢出状态与扩展值，然后恢复该槽，保留 enabled 状态与累计 enabled/running 时间，对齐 Linux `_perf_event_reset()` 清值但不关闭事件的语义。
 
@@ -135,6 +137,8 @@ per-task sampling group 由 `PerTaskCounter` 统一调度并预构建 `PERF_SAMP
 
 AArch64 kernel IRQ 和 user IRQ 入口按值构造 `InterruptedContext { pc, sp, fp, lr, privilege }`。用户 SP 必须来自进入汇编保存的 `UserContext.sp`，不能读取 Rust dispatch 时已恢复为线程头指针的 `SP_EL0`。LR 来自保存的 `x[30]`，用于 upstream perf 的 AArch64 FP unwinder 请求；只有用户 IRQ 且事件选择 LR 时才编码 ABI_64 和 LR，其他情况输出 ABI_NONE，不伪造用户寄存器。per-CPU snapshot 仅在一次 `dispatch_irq()` 动态作用域内可见，RAII guard 在返回和 unwind 路径清除旧值。
 
+硬件计数过滤与样本许可是不同边界。即使事件只计 EL0，IRQ 仍可能在 EL1 交付。Linux 在 `exclude_kernel` 下拒绝这类内核样本；Starry 当前尚未补齐该发布过滤，本次原生周期采样修复不以丢弃 EL1 样本替代真实用户链证明，也不改变 IRQ 现场标记。Linux 对照、资源策略和 #2673 的确定性回归要求见[原生周期采样](../../design/starry-perf-user-sampling.md)。
+
 `perf::unwind::{kernel_callchain,user_callchain}` 调用 `axbacktrace::walk_fp()` 并注入 reader：内核栈使用 `nofault::read_kernel_word()`，用户栈使用 `nofault::read_user_word()`。walker 检查 8 字节对齐、地址单调递增、地址范围、checked arithmetic、合理 frame gap 与输出容量，且不在遍历过程中分配。
 
 ### 3.2 ring 与 LOST
@@ -153,7 +157,7 @@ ring 无空间或 producer gate 竞争时增加 event 的 pending lost 数。下
 
 `SampleReadEntry::owned()` 强持有回调对象，直到注册代被撤销。system sampling 独立分配 `Arc<SamplingReadState>`，IRQ 只访问其中的计数与原子时间，不从 callback 裸指针借用正在控制锁下修改的 `HwPerfEventState`。task 的回调同样保留强引用。`ThreadPerfContext::attach()` 保留仍被 sampling slot 引用的已关闭 counter，使 scheduler 撤销 slot 时不会执行 counter 的最后析构；后续 task-context attach 或线程释放完成回收。非 GROUP 采样只读取 source；GROUP 采样保持 leader-first 顺序。各 event 的 `SamplingCount` 独立累计 raw delta，回调只读取累计快照，不通过数组位置推断 overflow 归属。
 
-`SamplingCountState::remaining` 跟踪逻辑周期剩余事件数，每次 raw 更新扣除已观察的 delta。单次硬件装载由 `hardware_period()` 限制为 `u32::MAX >> 1`，为中断延迟留出余量。中间片段 IRQ 只重装计数器；仅 `period_complete()` 为真时输出样本，`PERF_SAMPLE_PERIOD` 仍是请求的逻辑周期。`rearm()` 保留溢出后的超额计数，避免丢失整个 32 位回绕或提前产生样本。
+`SamplingCountState::remaining` 跟踪逻辑周期剩余事件数，每次 raw 更新扣除已观察的 delta。`hardware_period()` 按计数器活动位宽限制单次装载范围，为中断延迟留出余量：普通计数器保持 32 位分段，原生周期计数器使用 64 位装载范围，但逻辑周期上限仍为 u32。中间片段 IRQ 只重装计数器；仅 `period_complete()` 为真时输出样本，`PERF_SAMPLE_PERIOD` 仍是请求的逻辑周期。`rearm()` 保留溢出后的超额计数，避免截断回绕增量或提前产生样本。
 
 `SamplingCountState::period` 记录当前逻辑周期，首次 arm 才初始化 `remaining`。task 切片结束后只把该片段的 total 折叠到累计值；下次切入清零片段 total，但保留 remaining 与已调整的 period。system event 的 DISABLE/ENABLE 同样续接周期，RESET 只清事件值，不丢弃 `period_left`，对应 Linux `_perf_event_reset()` 与 `armpmu_event_set_period()`。`perf-hw-sliced-period` 强制同 CPU 管道往返或 system event 启停，并检查每段增量小于一个周期、总增量超过三个周期时仍输出样本。
 
@@ -204,7 +208,7 @@ system sideband 的 `SystemSidebandSource::observer` 捕获 opener 的 PID names
 
 ### 5.1 QEMU TCG
 
-AArch64 system suite 的 `perf-*` 子用例通过 `grouped_qemu_profiles` 独立运行，配置在 `perf-aarch64.toml`；它与 linux-perf app 显式使用 `-cpu cortex-a53,pmu=on -smp 4 -icount shift=auto,align=off,sleep=on`。其他 system 子用例保留默认 MTTCG 配置，不受 perf 模拟时钟影响。`qemu_profiles::expand()` 在已有选择结果上做互斥分组，未匹配项仍执行，原有定向入口不变。TCG 可验证 `perf_event_open`、计数器生命周期、溢出控制、mmap ring、group、LOST、callchain 编码和 upstream perf 控制流；cycle 是虚拟时间，多数 cache/branch/stall 事件不实现或为零。
+AArch64 system suite 的 `perf-*` 子用例通过 `grouped_qemu_profiles` 独立运行，配置在 `perf-aarch64.toml`，使用 `-cpu cortex-a53,pmu=on -smp 4 -icount shift=0,align=off,sleep=on`；本次修复保持该既有 profile 不变，不调整 linux-perf app 的配置。其他 system 子用例保留默认 MTTCG 配置，不受 perf 模拟时钟影响。`qemu_profiles::expand()` 在已有选择结果上做互斥分组，未匹配项仍执行，原有定向入口不变。TCG 可验证 `perf_event_open`、计数器生命周期、溢出控制、mmap ring、group、LOST、callchain 编码和 upstream perf 控制流；cycle 是虚拟时间，多数 cache/branch/stall 事件不实现或为零。
 
 CI run `34438510466` 证明不能将 icount 扩展到整个 system suite：四个 perf 固定大循环超时 120 秒，`poll`/`timerfd` 时间断言失败，最后套件超时 1800 秒。采样测试改为等到记录发布，LOST 测试先通过 read 确认累计丢样再释放环空间并核对 LOST 精确值；exec 子进程运行一秒 guest 时间的采样负载。保留原有超时与计数断言，不把宿主执行速度当作测试目标。
 

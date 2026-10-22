@@ -2,24 +2,55 @@
 
 use super::cpu_id::PerfCpuId;
 
+/// Architectural index of the 64-bit cycle counter in the PMU overflow mask.
+///
+/// The sampling registry and `PMOVSCLR_EL0` share this identity, so a native
+/// cycle sampling generation is tracked exactly like a programmable slot. Only
+/// the AArch64 PMU backend maps counters to that hardware identity.
+#[cfg(target_arch = "aarch64")]
+pub(super) const CYCLE_COUNTER_SLOT: usize = 31;
+
 /// Hardware counter selected for one PMU event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Counter {
+pub enum Counter {
     Cycle,
     Programmable(usize),
+}
+
+/// Hardware identity of a reservation; the AArch64 PMU backend owns it.
+#[cfg(target_arch = "aarch64")]
+impl Counter {
+    /// Returns this counter's registry index, also its overflow-mask bit.
+    pub(super) const fn sample_slot(self) -> usize {
+        match self {
+            Self::Cycle => CYCLE_COUNTER_SLOT,
+            Self::Programmable(slot) => slot,
+        }
+    }
+
+    /// Returns the active overflow width of the backing counter.
+    ///
+    /// Per-CPU initialization selects 32-bit programmable counters; the
+    /// architectural cycle counter is always 64-bit.
+    pub(super) const fn width(self) -> u8 {
+        match self {
+            Self::Cycle => 64,
+            Self::Programmable(_) => 32,
+        }
+    }
 }
 
 /// Identity returned by the per-CPU sampling registry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct SampleRegistration {
     owner: PerfCpuId,
-    counter: usize,
+    counter: Counter,
     generation: u64,
 }
 
 impl SampleRegistration {
     /// Creates a registry identity after one slot has been published.
-    pub(crate) const fn new(owner: PerfCpuId, counter: usize, generation: u64) -> Self {
+    pub(crate) const fn new(owner: PerfCpuId, counter: Counter, generation: u64) -> Self {
         Self {
             owner,
             counter,
@@ -32,9 +63,15 @@ impl SampleRegistration {
         self.owner
     }
 
-    /// Returns the programmable PMU counter index.
-    pub(crate) const fn counter(self) -> usize {
+    /// Returns the hardware counter identity owning this generation.
+    pub(crate) const fn counter(self) -> Counter {
         self.counter
+    }
+
+    /// Returns the registry index of that counter.
+    #[cfg(target_arch = "aarch64")]
+    pub(crate) const fn slot(self) -> usize {
+        self.counter.sample_slot()
     }
 
     /// Returns the globally unique slot generation.
@@ -338,7 +375,7 @@ mod tests {
         let cpu = PerfCpuId::new(1);
         let mut state = PmuRunState::new();
         let arm = state.begin_arm(cpu, TEST_COUNTER).unwrap();
-        let registration = SampleRegistration::new(cpu, 3, 17);
+        let registration = SampleRegistration::new(cpu, Counter::Programmable(3), 17);
         state.publish_registration(arm, registration);
 
         let PmuCloseAction::Stop(lease) = state.begin_close() else {
@@ -354,7 +391,7 @@ mod tests {
         let cpu = PerfCpuId::new(2);
         let mut state = PmuRunState::new();
         let arm = state.begin_arm(cpu, TEST_COUNTER).unwrap();
-        let registration = SampleRegistration::new(cpu, 4, 23);
+        let registration = SampleRegistration::new(cpu, Counter::Programmable(4), 23);
         state.publish_registration(arm, registration);
         state.finish_arm(arm);
 
@@ -363,7 +400,7 @@ mod tests {
         };
         let observed = lease.registration().unwrap();
         assert_eq!(observed.owner(), cpu);
-        assert_eq!(observed.counter(), 4);
+        assert_eq!(observed.counter(), Counter::Programmable(4));
         assert_eq!(observed.generation(), 23);
     }
 
