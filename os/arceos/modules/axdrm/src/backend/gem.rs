@@ -508,7 +508,7 @@ unsafe fn ax_gem_fb_init(
     let mut objects = [ptr::null_mut::<DrmGemObject>(); 4];
     let mut acquired = 0usize;
     let mut error = 0;
-    for plane in 0..num_planes {
+    for (plane, object_slot) in objects.iter_mut().enumerate().take(num_planes) {
         // SAFETY: `format` is valid and plane index is checked < num_planes <= 4.
         let width = unsafe { drm_format_info_plane_width(format, request.width, plane as u32) };
         // SAFETY: `format` is valid and plane index is checked < num_planes <= 4.
@@ -519,7 +519,7 @@ unsafe fn ax_gem_fb_init(
             error = -drm_kapi::config::ENOENT;
             break;
         }
-        objects[plane] = object;
+        *object_slot = object;
         acquired += 1;
         // SAFETY: `format` is valid and plane index is in bounds.
         let Ok(min_pitch) =

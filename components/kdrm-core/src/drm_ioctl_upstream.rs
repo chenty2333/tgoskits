@@ -9,7 +9,7 @@
 use core::ffi::{c_char, c_uint, c_ulong, c_void};
 
 use drm_kapi::{
-    config::{CAP_SYS_ADMIN, EFAULT, EINVAL, ENODEV, ENOMEM, EOPNOTSUPP, GFP_KERNEL},
+    config::{CAP_SYS_ADMIN, EFAULT, EINVAL, ENODEV, ENOMEM, ENOTTY, EOPNOTSUPP, GFP_KERNEL},
     kernel_services::{capable, current_pid_vnr},
     memory::{kfree, kmalloc},
     mm_native::{copy_from_user, copy_to_user},
@@ -1151,7 +1151,7 @@ pub unsafe extern "C" fn drm_ioctl(filp: *mut File, cmd: c_uint, arg: c_ulong) -
         }
 
         if (cmd >> 8) & 0xff != u32::from(b'd') {
-            return -25; // ENOTTY: another device's ioctl namespace.
+            return -ENOTTY; // Another device's ioctl namespace.
         }
         let nr = cmd & 0xff;
         let is_driver = (0x40..0xa0).contains(&nr);

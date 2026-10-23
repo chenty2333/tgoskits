@@ -18,7 +18,7 @@ use core::{
 };
 
 use crate::{
-    config::is_err,
+    config::{ENOTTY, is_err},
     dma_fence::{
         dma_fence_add_callback, dma_fence_driver_name, dma_fence_get, dma_fence_get_status,
         dma_fence_is_signaled, dma_fence_put, dma_fence_remove_callback, dma_fence_set_deadline,
@@ -40,7 +40,6 @@ const EFAULT: c_int = 14;
 const ENOMEM: c_int = 12;
 const ENOENT: c_int = 2;
 const EINVAL: c_int = 22;
-const ENOTTY: c_int = 25;
 /// The only poll event a sync_file reports: readable once its fence signaled.
 const EPOLLIN: c_uint = 0x001;
 const O_CLOEXEC: c_int = 0o2000000;

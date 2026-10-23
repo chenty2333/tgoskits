@@ -37,6 +37,7 @@ pub const EFAULT: i32 = 14;
 pub const EBUSY: i32 = 16;
 pub const ENODEV: i32 = 19;
 pub const EINVAL: i32 = 22;
+pub const ENOTTY: i32 = 25;
 pub const E2BIG: i32 = 7;
 pub const EPIPE: i32 = 32;
 pub const EDEADLK: i32 = 35;

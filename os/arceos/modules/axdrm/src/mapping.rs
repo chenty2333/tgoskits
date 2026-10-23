@@ -100,8 +100,7 @@ pub unsafe fn mmap(file: *mut DrmFile, offset: u64, length: u64) -> Result<MmapL
     }
     let pages = usize::try_from(length / PAGE_SIZE as u64).map_err(|_| NEG_EINVAL)?;
     let start_page = offset / PAGE_SIZE as u64;
-    let end_page = start_page.checked_add(pages as u64).ok_or(NEG_EINVAL)?;
-    let _ = end_page;
+    start_page.checked_add(pages as u64).ok_or(NEG_EINVAL)?;
 
     // SAFETY:
     // - `vma_manager` is verified non-null and points to the live `DrmVmaOffsetManager` owned by `dev`.
