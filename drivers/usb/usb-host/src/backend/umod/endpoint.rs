@@ -326,6 +326,12 @@ impl TransferHandleRaw {
                     status,
                 });
             }
+            // libusb's aggregate actual_length is not valid for ISO transfers.
+            out.transfer_len = out
+                .iso_packets
+                .iter()
+                .map(|packet| packet.actual_length)
+                .sum();
         }
         Ok(out)
     }
@@ -359,5 +365,72 @@ extern "system" fn transfer_callback(transfer: *mut libusb_transfer) {
             .ok
             .store(true, std::sync::atomic::Ordering::Release);
         trans_handle.waker.wake();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use libusb1_sys::constants::{
+        LIBUSB_TRANSFER_COMPLETED, LIBUSB_TRANSFER_ERROR, LIBUSB_TRANSFER_OVERFLOW,
+    };
+
+    use super::*;
+
+    #[test]
+    fn iso_completion_preserves_packet_results_and_sums_actual_lengths() {
+        // SAFETY: allocate three descriptors owned exclusively by this test.
+        let transfer = unsafe { libusb1_sys::libusb_alloc_transfer(3) };
+        assert!(!transfer.is_null());
+        let handle = TransferHandleRaw {
+            transfer,
+            origin: Transfer {
+                kind: TransferKind::Isochronous {
+                    packet_lengths: vec![64; 3],
+                },
+                direction: Direction::Out,
+                buffer: None,
+                transfer_len: 0,
+                iso_packets: Vec::new(),
+            },
+            ok: AtomicBool::new(true),
+            waker: AtomicWaker::new(),
+            _temp_buff: Vec::new(),
+        };
+        // SAFETY: libusb allocated the initialized transfer and three trailing
+        // descriptors. It was never submitted, so no callback or device can
+        // access it. The handle keeps it alive until conversion finishes.
+        unsafe {
+            (*transfer).status = LIBUSB_TRANSFER_COMPLETED;
+            (*transfer).num_iso_packets = 3;
+            // This aggregate field is not valid for ISO transfers.
+            (*transfer).actual_length = 0;
+            for (index, (actual, status)) in [
+                (0, LIBUSB_TRANSFER_ERROR),
+                (12, LIBUSB_TRANSFER_COMPLETED),
+                (16, LIBUSB_TRANSFER_OVERFLOW),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let packet = &mut *(*transfer).iso_packet_desc.as_mut_ptr().add(index);
+                packet.length = 64;
+                packet.actual_length = actual;
+                packet.status = status;
+            }
+        }
+        let completed = transfer_to_completion(RequestId::new(1), handle.to_result().unwrap());
+        assert_eq!(completed.actual_length, 28);
+        assert_eq!(
+            completed
+                .iso_packets
+                .iter()
+                .map(|packet| (packet.actual_length, packet.status))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, TransferStatus::Error),
+                (12, TransferStatus::Completed),
+                (16, TransferStatus::Overflow),
+            ]
+        );
     }
 }

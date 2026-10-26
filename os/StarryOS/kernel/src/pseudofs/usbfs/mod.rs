@@ -834,28 +834,32 @@ impl UsbDeviceFile {
     fn transfer_completion_to_result(
         mut submitted: SubmittedUrb,
         completion: TransferCompletion,
-    ) -> UrbTransferResult {
+    ) -> StarryResult<UrbTransferResult> {
+        if completion.iso_packets.len() != submitted.packet_lengths.len() {
+            // Queue a terminal URB error instead of discovering a malformed
+            // completion only after REAPURB has removed it from the queue.
+            return Err(StarryError::InvalidData);
+        }
         let data = if submitted.is_in {
-            let actual =
-                if submitted.packet_lengths.is_empty() || completion.iso_packets.is_empty() {
-                    completion.actual_length
-                } else {
-                    iso_copy_len(&submitted.packet_lengths, &completion.iso_packets)
-                }
-                .min(submitted.buffer.len());
+            let actual = if submitted.packet_lengths.is_empty() {
+                completion.actual_length
+            } else {
+                iso_copy_len(&submitted.packet_lengths, &completion.iso_packets)
+            }
+            .min(submitted.buffer.len());
             submitted.buffer.truncate(actual);
             submitted.buffer
         } else {
             Vec::new()
         };
 
-        UrbTransferResult {
+        Ok(UrbTransferResult {
             data,
             data_offset: submitted.data_offset,
             actual_length: completion.actual_length,
             iso_packet_count: submitted.packet_lengths.len(),
             iso_packets: completion.iso_packets,
-        }
+        })
     }
 
     fn complete_submitted_urb(
@@ -1603,8 +1607,9 @@ fn completed_urb_from_result(
 ) -> CompletedUrb {
     CompletedUrb {
         user_urb_ptr,
-        result: result
-            .map(|completion| UsbDeviceFile::transfer_completion_to_result(submitted, completion)),
+        result: result.and_then(|completion| {
+            UsbDeviceFile::transfer_completion_to_result(submitted, completion)
+        }),
         log,
     }
 }
@@ -1773,10 +1778,6 @@ fn iso_copy_len(
     packet_lengths: &[usize],
     packet_results: &[crab_usb::usb_if::endpoint::IsoPacketResult],
 ) -> usize {
-    if packet_results.len() != packet_lengths.len() {
-        return packet_lengths.iter().sum();
-    }
-
     let mut offset = 0usize;
     let mut copy_len = 0usize;
     for (requested, packet) in packet_lengths.iter().copied().zip(packet_results.iter()) {
@@ -1968,7 +1969,7 @@ mod tests {
         let adapter = TestUsbfsAdapter::new();
         let mut submitted = adapter.submit_async_urb(1);
         submitted.packet_lengths = vec![64, 64];
-        let result = UsbDeviceFile::transfer_completion_to_result(submitted, completion);
+        let result = UsbDeviceFile::transfer_completion_to_result(submitted, completion).unwrap();
         let mut descs = vec![descriptor::UsbdevfsIsoPacketDesc::default(); 2];
         assert_eq!(
             set_iso_packet_results(&mut descs, &result.iso_packets).unwrap(),
@@ -1980,6 +1981,32 @@ mod tests {
         assert_eq!(descs[0].status as i32, -Errno::EIO.into_raw());
         assert_eq!(descs[1].actual_length, 12);
         assert_eq!(descs[1].status, 0);
+    }
+
+    #[test]
+    fn malformed_iso_completion_keeps_a_terminal_urb_error() {
+        let adapter = TestUsbfsAdapter::new();
+        for returned_packets in [1, 3] {
+            let mut submitted = adapter.submit_async_urb(1);
+            submitted.packet_lengths = vec![64, 64];
+            let completion = TransferCompletion {
+                request_id: RequestId::new(1),
+                status: TransferStatus::Completed,
+                actual_length: 0,
+                iso_packets: vec![
+                    IsoPacketResult {
+                        requested_length: 64,
+                        actual_length: 0,
+                        status: TransferStatus::MissedService,
+                    };
+                    returned_packets
+                ],
+            };
+            let user_urb_ptr = submitted.user_urb_ptr;
+            let completed = terminal_completed_urb(submitted, Ok(completion)).unwrap();
+            assert_eq!(completed.user_urb_ptr, user_urb_ptr);
+            assert!(matches!(completed.result, Err(StarryError::InvalidData)));
+        }
     }
 
     #[test]

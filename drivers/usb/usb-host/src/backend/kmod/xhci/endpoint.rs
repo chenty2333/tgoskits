@@ -997,13 +997,13 @@ fn iso_packet_actual_length(
             xhci::ring::trb::event::CompletionCode::ShortPacket
             | xhci::ring::trb::event::CompletionCode::BabbleDetectedError
             | xhci::ring::trb::event::CompletionCode::IsochBufferOverrun
+            | xhci::ring::trb::event::CompletionCode::MissedServiceError
             | xhci::ring::trb::event::CompletionCode::UsbTransactionError
             | xhci::ring::trb::event::CompletionCode::Stopped => {
                 Ok(requested.saturating_sub(remaining))
             }
             xhci::ring::trb::event::CompletionCode::StoppedShortPacket => Ok(remaining),
-            xhci::ring::trb::event::CompletionCode::StoppedLengthInvalid
-            | xhci::ring::trb::event::CompletionCode::MissedServiceError => Ok(0),
+            xhci::ring::trb::event::CompletionCode::StoppedLengthInvalid => Ok(0),
             code => {
                 code.to_result()?;
                 Ok(requested.saturating_sub(remaining))
@@ -1017,17 +1017,22 @@ fn iso_packet_actual_length(
 
 fn iso_packet_status(event: TransferEvent) -> TransferStatus {
     match event.completion_code() {
-        Ok(CompletionCode::Success | CompletionCode::ShortPacket) => TransferStatus::Completed,
-        Ok(CompletionCode::MissedServiceError) => TransferStatus::MissedService,
+        Ok(
+            CompletionCode::Success
+            | CompletionCode::ShortPacket
+            | CompletionCode::StoppedShortPacket,
+        ) => TransferStatus::Completed,
+        // Linux keeps the initial -EXDEV for stopped packets without a short
+        // packet completion. Explicit request cancellation is handled above.
+        Ok(
+            CompletionCode::MissedServiceError
+            | CompletionCode::Stopped
+            | CompletionCode::StoppedLengthInvalid,
+        ) => TransferStatus::MissedService,
         Ok(CompletionCode::BabbleDetectedError | CompletionCode::IsochBufferOverrun) => {
             TransferStatus::Overflow
         }
         Ok(CompletionCode::UsbTransactionError) => TransferStatus::ProtocolError,
-        Ok(
-            CompletionCode::Stopped
-            | CompletionCode::StoppedShortPacket
-            | CompletionCode::StoppedLengthInvalid,
-        ) => TransferStatus::Cancelled,
         _ => TransferStatus::Error,
     }
 }
@@ -1216,9 +1221,10 @@ mod tests {
     fn iso_completion_preserves_packet_errors_and_short_lengths() {
         let _guard = TEST_ENDPOINT_LOCK.lock().unwrap();
         let (_mmio, mut endpoint) = test_endpoint();
-        let payload = [0u8; 384];
+        let packet_lengths = [64, 64, 3072, 64, 64, 64, 64, 64, 64];
+        let payload = vec![0u8; packet_lengths.iter().sum()];
         let id = endpoint
-            .submit_request(TransferRequest::iso_out(&payload, &[64; 6]))
+            .submit_request(TransferRequest::iso_out(&payload, &packet_lengths))
             .unwrap();
         let private_id = Endpoint::private_request_id(id);
         let trbs = match &endpoint.inflight[&private_id].kind {
@@ -1229,10 +1235,13 @@ mod tests {
         // The first packet has no event: reaching the final TD skips it.
         for (index, code, remaining) in [
             (1, CompletionCode::UsbTransactionError, 32),
-            (2, CompletionCode::MissedServiceError, 0),
+            (2, CompletionCode::MissedServiceError, 1024),
             (3, CompletionCode::BabbleDetectedError, 0),
             (4, CompletionCode::ShortPacket, 16),
-            (5, CompletionCode::Success, 0),
+            (5, CompletionCode::Stopped, 16),
+            (6, CompletionCode::StoppedShortPacket, 12),
+            (7, CompletionCode::StoppedLengthInvalid, 0),
+            (8, CompletionCode::Success, 0),
         ] {
             let event =
                 TransferEvent::try_from([0, 0, ((code as u32) << 24) | remaining, 32 << 10])
@@ -1245,25 +1254,25 @@ mod tests {
             );
         }
         let completed = endpoint.reclaim_request(id).unwrap().unwrap();
-        assert_eq!(completed.actual_length, 32 + 64 + 48 + 64);
-        assert_eq!(completed.iso_packets[0].actual_length, 0);
-        assert_ne!(
-            completed.iso_packets[0].status,
-            usb_if::endpoint::TransferStatus::Completed
-        );
-        assert_ne!(
-            completed.iso_packets[1].status,
-            usb_if::endpoint::TransferStatus::Completed
-        );
-        assert_eq!(completed.iso_packets[2].actual_length, 0);
         assert_eq!(
-            completed.iso_packets[2].status,
-            TransferStatus::MissedService
+            completed
+                .iso_packets
+                .iter()
+                .map(|packet| (packet.actual_length, packet.status))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, TransferStatus::MissedService),
+                (32, TransferStatus::ProtocolError),
+                (2048, TransferStatus::MissedService),
+                (64, TransferStatus::Overflow),
+                (48, TransferStatus::Completed),
+                (48, TransferStatus::MissedService),
+                (12, TransferStatus::Completed),
+                (0, TransferStatus::MissedService),
+                (64, TransferStatus::Completed),
+            ]
         );
-        assert_eq!(completed.iso_packets[3].status, TransferStatus::Overflow);
-        assert_eq!(completed.iso_packets[4].actual_length, 48);
-        assert_eq!(completed.iso_packets[4].status, TransferStatus::Completed);
-        assert_eq!(completed.iso_packets[5].status, TransferStatus::Completed);
+        assert_eq!(completed.actual_length, 32 + 2048 + 64 + 48 + 48 + 12 + 64);
         assert!(endpoint.reclaim_request(id).is_none());
     }
 

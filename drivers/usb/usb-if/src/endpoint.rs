@@ -310,7 +310,7 @@ pub enum TransferStatus {
     Stalled,
     Cancelled,
     Error,
-    /// The periodic service opportunity was missed; no packet data is valid.
+    /// The packet was not fully serviced; actual_length may include partial data.
     MissedService,
     /// The device or controller overran the packet buffer.
     Overflow,
